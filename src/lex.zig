@@ -1,13 +1,16 @@
 const std = @import("std");
 
+// not a distinct type, only used for readability
+pub const ByteOffset = u32;
+
 // each token contains a type (tag), start, and end index in the source string
 pub const Token = struct {
     tag: Tag,
     loc: Loc,
 
     pub const Loc = struct {
-        start: u32,
-        end: u32,
+        start: ByteOffset,
+        end: ByteOffset,
     };
 
     pub const Tag = enum {
