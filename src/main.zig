@@ -1,5 +1,6 @@
 const std = @import("std");
 const lex = @import("lex.zig");
+const cst = @import("cst.zig");
 
 const io = std.io;
 const max_file_size = std.math.maxInt(u32);
