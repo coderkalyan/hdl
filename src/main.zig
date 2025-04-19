@@ -1,6 +1,7 @@
 const std = @import("std");
 const lex = @import("lex.zig");
-const cst = @import("cst.zig");
+const Cst = @import("Cst.zig");
+const parse = @import("parse.zig");
 
 const io = std.io;
 const max_file_size = std.math.maxInt(u32);
@@ -38,13 +39,11 @@ pub fn main() !void {
     _ = args.next(); // skip executable
     const filename = args.next().?;
 
+    // read in the entire source file, hard to stream in because the lexer
+    // needs a lookahead
     const source = try readSource(gpa, filename);
-    defer gpa.free(source);
 
-    var lexer: Lexer = .init(source);
-    while (true) {
-        const token = lexer.next();
-        std.debug.print("{}\n", .{token});
-        if (token.tag == .eof) break;
-    }
+    // the Cst owns the source
+    var tree = try parse.parse(gpa, source);
+    defer tree.deinit(gpa);
 }

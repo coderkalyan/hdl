@@ -64,8 +64,9 @@ pub const Token = struct {
         minus_r_angle,
 
         // keywords
-        k_fn,
-        k_return,
+        k_module,
+        // k_fn,
+        // k_return,
         k_let,
         k_type,
         k_switch,
@@ -76,7 +77,7 @@ pub const Token = struct {
         k_union,
         // k_enum,
         // k_variant,
-        k_for,
+        // k_for,
         // k_break,
         k_or,
         k_and,
@@ -93,8 +94,9 @@ pub const Token = struct {
     };
 
     pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{
-        .{ "fn", .k_fn },
-        .{ "return", .k_return },
+        .{ "module", .k_module },
+        // .{ "fn", .k_fn },
+        // .{ "return", .k_return },
         .{ "let", .k_let },
         .{ "type", .k_type },
         .{ "switch", .k_switch },
@@ -105,7 +107,7 @@ pub const Token = struct {
         .{ "union", .k_union },
         // .{ "enum", .k_enum },
         // .{ "variant", .k_variant },
-        .{ "for", .k_for },
+        // .{ "for", .k_for },
         // .{ "break", .k_break },
         .{ "or", .k_or },
         .{ "and", .k_and },
