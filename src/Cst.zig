@@ -52,6 +52,9 @@ pub const Item = struct {
         ident,
         integer,
         bool,
+        // aggregate values
+        struct_literal,
+        field_init,
         // aggregate types
         array,
         // bundle,
@@ -90,6 +93,16 @@ pub const Node = struct {
         integer,
         // a boolean literal, 'true' or 'false'
         bool,
+
+        // struct literal
+        struct_literal: struct {
+            // expression node for the struct type
+            type: Index,
+            // list of field initializers
+            fields: []const Index,
+        },
+        // field initializer for struct literals
+        field_init: Index,
 
         // array type '[n]T'
         array: struct {
@@ -166,6 +179,8 @@ pub const Node = struct {
                 .ident => .ident,
                 .integer => .integer,
                 .bool => .bool,
+                .struct_literal => .struct_literal,
+                .field_init => .field_init,
                 .array => .array,
                 .unary => .unary,
                 .binary => .binary,
@@ -190,6 +205,7 @@ pub const Node = struct {
                 .type,
                 .yield,
                 .port,
+                .field_init,
                 => |pl| .{ @intFromEnum(pl), undefined },
                 inline .array,
                 .binary,
@@ -209,6 +225,11 @@ pub const Node = struct {
                 => |pl| payload: {
                     const slice = try p.addSlice(@ptrCast(pl));
                     break :payload .{ @intFromEnum(slice), undefined };
+                },
+                .struct_literal => |pl| payload: {
+                    const struct_type = @intFromEnum(pl.type);
+                    const fields = try p.addSlice(@ptrCast(pl.fields));
+                    break :payload .{ struct_type, @intFromEnum(fields) };
                 },
                 .ports => |ports| payload: {
                     const inputs = try p.addSlice(@ptrCast(ports.inputs));
