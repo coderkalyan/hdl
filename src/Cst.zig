@@ -61,6 +61,7 @@ pub const Item = struct {
         array,
         bundle,
         field,
+        @"enum",
         // expressions
         unary,
         binary,
@@ -163,6 +164,13 @@ pub const Node = struct {
 
         // block of code (list of nodes)
         block: []const Index,
+
+        @"enum": struct {
+            type: Index,
+            // list of variants
+            variants: []const Index,
+        },
+
         // hardware module (input, output, block)
         module: struct {
             // list of input and output ports
@@ -213,6 +221,7 @@ pub const Node = struct {
                 .port => .port,
                 .ports => .ports,
                 .toplevel => .toplevel,
+                .@"enum" => .@"enum",
             },
             .payload = switch (node.payload) {
                 .null,
@@ -259,6 +268,11 @@ pub const Node = struct {
                     const inputs = try p.addSlice(@ptrCast(ports.inputs));
                     const outputs = try p.addSlice(@ptrCast(ports.outputs));
                     break :payload .{ @intFromEnum(inputs), @intFromEnum(outputs) };
+                },
+                .@"enum" => |pl| payload: {
+                    const enum_type = @intFromEnum(pl.type);
+                    const variants = try p.addSlice(@ptrCast(pl.variants));
+                    break :payload .{ enum_type, @intFromEnum(variants) };
                 },
             },
         };

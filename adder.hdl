@@ -3,3 +3,7 @@ type FullAdder = module(a: b1, b: b1, cin: b1) -> (sum: b1, cout: b1) {
     let cout = (a & b) | (a & cin) | (b & cin);
     yield .{ .sum = sum, .cout = cout };
 };
+
+type myenum = enum (u8) {
+    a, b, c
+};

@@ -179,7 +179,7 @@ pub const Parser = struct {
         });
     }
 
-    fn parseList(p: *Parser, comptime element: anytype, surround: struct { open: Token.Tag, close: Token.Tag }) ![]const u32 {
+    fn parseList(p: *Parser, comptime element: anytype, surround: struct { open: Token.Tag, close: Token.Tag }) ![]const Cst.Index {
         _ = try p.expect(surround.open);
 
         const scratch_top = p.scratch.items.len;
@@ -198,7 +198,7 @@ pub const Parser = struct {
         }
 
         const elements = p.scratch.items[scratch_top..];
-        return elements;
+        return @ptrCast(elements);
     }
 
     const min_precedence: i32 = 0;
@@ -703,6 +703,25 @@ pub const Parser = struct {
         });
     }
 
+    fn @"enum"(p: *Parser) Error!Cst.Index {
+        const enum_token = try p.expect(.k_enum);
+        var backing_type_identifier: Cst.Index = .null;
+
+        if (p.current() == .l_paren) {
+            _ = try p.expect(.l_paren);
+            backing_type_identifier = try p.typeExpression();
+            _ = try p.expect(.r_paren);
+        }
+
+        const named_states = try p.parseList(identifier, .{ .open = .l_brace, .close = .r_brace });
+        return p.addNode(.{
+            .main_token = enum_token,
+            .payload = .{
+                .@"enum" = .{ .type = backing_type_identifier, .variants = named_states },
+            },
+        });
+    }
+
     fn field(p: *Parser) !Cst.Index {
         const ident_token = try p.expect(.ident);
         _ = try p.expect(.colon);
@@ -722,6 +741,9 @@ pub const Parser = struct {
             .l_bracket => p.array(),
             .k_bundle => p.bundle(),
             // .k_enum => p.enumType(),
+            // .l_bracket => p.arrayType(),
+            // .k_bundle => p.bundleType(),
+            .k_enum => p.@"enum"(),
             // .k_tagged => p.taggedType(),
             // .k_union => p.unionType(),
             else => unreachable,
