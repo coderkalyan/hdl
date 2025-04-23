@@ -55,6 +55,8 @@ pub const Item = struct {
         // aggregate values
         struct_literal,
         field_init,
+        instance,
+        port_assign,
         // aggregate types
         array,
         bundle,
@@ -69,6 +71,7 @@ pub const Item = struct {
         // declarations
         signal,
         type,
+        decl,
         // control flow
         yield,
         // @"switch",
@@ -104,13 +107,17 @@ pub const Node = struct {
         },
         // field initializer for struct literals
         field_init: Index,
+        // module instantiation
+        // NOTE: module type should be a full node to support scoping
+        instance: []const Index,
+        port_assign: Index,
 
         // array type '[n]T'
         array: struct {
             // expression node for the array size
             count: Index,
             // type node for the array element type
-            element: Index,
+            element_type: Index,
         },
         // bundle type 'bundle { field: T, ... }'
         bundle: []const Index,
@@ -148,6 +155,8 @@ pub const Node = struct {
         },
         // declaration of a type
         type: Index,
+        // forward declaration of a signal
+        decl: Index,
 
         // yields a value from an expression block
         yield: Index,
@@ -186,6 +195,8 @@ pub const Node = struct {
                 .bool => .bool,
                 .struct_literal => .struct_literal,
                 .field_init => .field_init,
+                .instance => .instance,
+                .port_assign => .port_assign,
                 .array => .array,
                 .bundle => .bundle,
                 .field => .field,
@@ -195,6 +206,7 @@ pub const Node = struct {
                 .member => .member,
                 .signal => .signal,
                 .type => .type,
+                .decl => .decl,
                 .yield => .yield,
                 .block => .block,
                 .module => .module,
@@ -214,6 +226,8 @@ pub const Node = struct {
                 .port,
                 .field_init,
                 .field,
+                .decl,
+                .port_assign,
                 => |pl| .{ @intFromEnum(pl), undefined },
                 inline .array,
                 .binary,
@@ -231,6 +245,7 @@ pub const Node = struct {
                 inline .block,
                 .toplevel,
                 .bundle,
+                .instance,
                 => |pl| payload: {
                     const slice = try p.addSlice(@ptrCast(pl));
                     break :payload .{ @intFromEnum(slice), undefined };

@@ -350,9 +350,30 @@ pub const Parser = struct {
     // just use main_token
     fn identifier(p: *Parser) !Cst.Index {
         const ident_token = try p.expect(.ident);
+        if (p.current() == .l_paren) return p.instance(ident_token);
+
         return p.addNode(.{
             .main_token = ident_token,
             .payload = .{ .ident = {} },
+        });
+    }
+
+    fn instance(p: *Parser, ident_token: TokenIndex) !Cst.Index {
+        const assignments = try p.parseList(portAssign, .{ .open = .l_paren, .close = .r_paren });
+        return p.addNode(.{
+            .main_token = ident_token,
+            .payload = .{ .instance = @ptrCast(assignments) },
+        });
+    }
+
+    fn portAssign(p: *Parser) !Cst.Index {
+        const ident_token = try p.expect(.ident);
+        _ = try p.expect(.equal);
+        const value = try p.expression();
+
+        return p.addNode(.{
+            .main_token = ident_token,
+            .payload = .{ .port_assign = value },
         });
     }
 
@@ -526,7 +547,7 @@ pub const Parser = struct {
     fn port(p: *Parser) !Cst.Index {
         const ident_token = try p.expect(.ident);
         _ = try p.expect(.colon);
-        const type_node = try p.expression();
+        const type_node = try p.typeExpression();
 
         return p.addNode(.{
             .main_token = ident_token,
@@ -580,8 +601,9 @@ pub const Parser = struct {
         const node = switch (p.current()) {
             .k_module => return p.module(),
             .k_let => p.signal(),
-            .k_yield => p.yield(),
             .k_type => p.typeDefinition(),
+            .k_decl => p.decl(),
+            .k_yield => p.yield(),
             else => {
                 std.debug.print("unexpected token: {} {s}\n", .{ p.current(), p.tokenString(p.index) });
                 unreachable;
@@ -612,7 +634,7 @@ pub const Parser = struct {
         var type_node: Cst.Index = .null;
         if (p.current() == .colon) {
             _ = p.eatCurrent();
-            type_node = try p.expression();
+            type_node = try p.typeExpression();
         }
 
         _ = try p.expect(.equal);
@@ -625,6 +647,20 @@ pub const Parser = struct {
                     .type = type_node,
                     .value = value_node,
                 },
+            },
+        });
+    }
+
+    fn decl(p: *Parser) !Cst.Index {
+        const decl_token = try p.expect(.k_decl);
+        _ = try p.expect(.ident);
+        _ = try p.expect(.colon);
+        const type_node = try p.typeExpression();
+
+        return p.addNode(.{
+            .main_token = decl_token,
+            .payload = .{
+                .decl = type_node,
             },
         });
     }
@@ -650,6 +686,23 @@ pub const Parser = struct {
         });
     }
 
+    fn array(p: *Parser) !Cst.Index {
+        const l_bracket_token = try p.expect(.l_bracket);
+        const count = try p.expression();
+        _ = try p.expect(.r_bracket);
+        const element_type = try p.typeExpression();
+
+        return p.addNode(.{
+            .main_token = l_bracket_token,
+            .payload = .{
+                .array = .{
+                    .count = count,
+                    .element_type = element_type,
+                },
+            },
+        });
+    }
+
     fn field(p: *Parser) !Cst.Index {
         const ident_token = try p.expect(.ident);
         _ = try p.expect(.colon);
@@ -666,7 +719,7 @@ pub const Parser = struct {
             .ident => p.identifier(),
             .l_paren => p.typeParen(),
             .k_module => p.module(),
-            // .l_bracket => p.arrayType(),
+            .l_bracket => p.array(),
             .k_bundle => p.bundle(),
             // .k_enum => p.enumType(),
             // .k_tagged => p.taggedType(),
