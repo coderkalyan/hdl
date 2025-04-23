@@ -1,6 +1,7 @@
 const std = @import("std");
 const lex = @import("lex.zig");
 const Cst = @import("Cst.zig");
+const Lexer = lex.Lexer;
 
 const Allocator = std.mem.Allocator;
 const Token = lex.Token;
@@ -36,10 +37,6 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Cst {
     defer parser.deinit();
 
     _ = try parser.toplevel();
-
-    // for (parser.nodes.items(.data), parser.nodes.items(.main_token)) |data, tok| {
-    //     std.debug.print("{} {}\n", .{ data, tokens.items(.tag)[tok] });
-    // }
 
     // copy parser results into an abstract syntax tree
     // that owns the source, token list, node list, and node extra data
@@ -150,6 +147,15 @@ pub const Parser = struct {
             }
         }
         return @enumFromInt(len);
+    }
+
+    pub fn tokenString(p: *Parser, index: TokenIndex) []const u8 {
+        const tokens = p.tokens;
+        const token_start = tokens.items(.start)[@intFromEnum(index)];
+        var lexer = Lexer.initIndex(p.source, token_start);
+        const token = lexer.next();
+
+        return p.source[token.loc.start..token.loc.end];
     }
 
     pub fn extraSlice(p: *Parser, sl: Cst.ExtraSlice) []const u32 {
@@ -322,6 +328,7 @@ pub const Parser = struct {
             };
         }
     }
+
     fn paren(p: *Parser) !Cst.Index {
         const l_paren_token = try p.expect(.l_paren);
         const inner_node = try p.expression();
@@ -413,43 +420,6 @@ pub const Parser = struct {
         });
     }
 
-    // fn structLiteral(p: *Parser) Error!Node.Index {
-    //     const start_token = p.index;
-    //     const type_node = try p.identifier(); // TODO: this should be a proper type expression
-    //
-    //     const fields = try p.parseList(fieldInitializer, .{ .open = .l_brace, .close = .r_brace });
-    //     return p.addNode(.{
-    //         .main_token = start_token,
-    //         .data = .{ .struct_literal = .{ .struct_type = type_node, .fields = fields } },
-    //     });
-    // }
-
-    // .field = value
-    // fn fieldInitializer(p: *Parser) !Node.Index {
-    //     var err = false;
-    //
-    //     const dot_token = try p.expect(.period);
-    //     _ = p.expect(.ident) catch token: {
-    //         try p.errors.append(.{ .tag = .missing_identifier, .token = p.index });
-    //         err = true;
-    //         break :token undefined;
-    //     };
-    //
-    //     _ = try p.expect(.equal);
-    //
-    //     const initializer = p.expression() catch node: {
-    //         try p.errors.append(.{ .tag = .missing_expression, .token = p.index });
-    //         err = true;
-    //         break :node undefined;
-    //     };
-    //
-    //     if (err) return error.HandledUserError;
-    //     return p.addNode(.{
-    //         .main_token = dot_token,
-    //         .data = .{ .field_initializer = initializer },
-    //     });
-    // }
-
     // operand[index]
     fn subscript(p: *Parser, operand: Node.Index) Error!Node.Index {
         const l_bracket_token = try p.expect(.l_bracket);
@@ -514,7 +484,7 @@ pub const Parser = struct {
 
     fn module(p: *Parser) !Index {
         const module_token = try p.expect(.k_module);
-        _ = try p.expect(.ident);
+        // _ = try p.expect(.ident);
 
         // NOTE: we can probably pull this out to help when parsing module
         // signature types without the body
@@ -601,90 +571,19 @@ pub const Parser = struct {
         });
     }
 
-    // fn structField(p: *Parser) !Node.Index {
-    //     var err = false;
-    //     const ident_token = p.expect(.ident) catch token: {
-    //         // We're missing an identifier flag it
-    //         try p.errors.append(.{ .tag = .missing_identifier, .token = p.index });
-    //         err = true;
-    //         break :token undefined;
-    //     };
-    //
-    //     _ = p.expect(.colon) catch {
-    //         // We're missing a colon flag it
-    //         try p.errors.append(.{ .tag = .missing_colon, .token = p.index });
-    //         err = true;
-    //     };
-    //     const type_node = p.typeExpression() catch node: {
-    //         // We're missing a type annotation
-    //         try p.errors.append(.{ .tag = .missing_type_annotation, .token = p.index });
-    //         err = true;
-    //         break :node undefined;
-    //     };
-    //
-    //     if (err) return error.HandledUserError;
-    //     return p.addNode(.{
-    //         .main_token = ident_token,
-    //         .data = .{ .field = type_node },
-    //     });
-    // }
-
-    // // parses a distinct type declaration (distinct type Point = ...)
-    // fn expectDistinctTypeDecl(self: *Parser) !Node.Index {
-    //     const distinct_token = try self.expect(.k_distinct);
-    //     _ = try self.expect(.k_type);
-    //     _ = try self.expect(.ident); // not stored, (main_token == distinct_token) + 2
-    //     _ = try self.expect(.equal);
-    //     const type_node = try self.typeExpression();
-    //
-    //     return self.addNode(.{
-    //         .main_token = distinct_token,
-    //         .data = .{ .distinct_type_decl = type_node },
-    //     });
-    // }
-
     fn statement(p: *Parser) Error!Cst.Index {
         const node = switch (p.current()) {
             .k_module => return p.module(),
             .k_let => p.signal(),
             .k_yield => p.yield(),
-            // .k_type => return p.type(),
+            .k_type => p.typeDefinition(),
             else => {
-                std.debug.print("unexpected token: {}\n", .{p.current()});
+                std.debug.print("unexpected token: {} {s}\n", .{ p.current(), p.tokenString(p.index) });
                 unreachable;
             },
-            // .k_def => return p.function(),
-            // .k_return => p.ret(),
-            // .k_del => p.del(),
-            // .k_for => return p.forLoop(),
-            // .k_while => return p.whileLoop(),
-            // .k_if => return p.branch(),
-            // .k_pass => p.pass(),
-            // .k_break => p.brk(),
-            // .k_continue => p.cont(),
-            // else => node: {
-            //     const expr = try p.expression();
-            //     break :node switch (p.token_tags[p.index]) {
-            //         .equal,
-            //         .plus_equal,
-            //         .minus_equal,
-            //         .asterisk_equal,
-            //         .slash_equal,
-            //         .asterisk_asterisk_equal,
-            //         .slash_slash_equal,
-            //         .percent_equal,
-            //         .ampersand_equal,
-            //         .pipe_equal,
-            //         .caret_equal,
-            //         .l_angle_l_angle_equal,
-            //         .r_angle_r_angle_equal,
-            //         => p.assignment(expr),
-            //         else => expr,
-            //     };
-            // },
         };
 
-        _ = p.eat(.semi);
+        _ = try p.expect(.semi);
         return node;
     }
 
@@ -722,6 +621,46 @@ pub const Parser = struct {
                     .value = value_node,
                 },
             },
+        });
+    }
+
+    fn typeParen(p: *Parser) !Cst.Index {
+        const l_paren_token = try p.expect(.l_paren);
+        const inner_node = try p.typeExpression();
+        _ = try p.expect(.r_paren);
+
+        return p.addNode(.{
+            .main_token = l_paren_token,
+            .payload = .{ .unary = inner_node },
+        });
+    }
+
+    fn typeExpression(p: *Parser) Error!Cst.Index {
+        const node = switch (p.current()) {
+            .ident => p.identifier(),
+            .l_paren => p.typeParen(),
+            .k_module => p.module(),
+            // .l_bracket => p.arrayType(),
+            // .k_bundle => p.bundleType(),
+            // .k_enum => p.enumType(),
+            // .k_tagged => p.taggedType(),
+            // .k_union => p.unionType(),
+            else => unreachable,
+        };
+
+        return node;
+    }
+
+    fn typeDefinition(p: *Parser) !Cst.Index {
+        const type_token = try p.expect(.k_type);
+        _ = try p.expect(.ident);
+        _ = try p.expect(.equal);
+
+        const type_decl = try p.typeExpression();
+
+        return p.addNode(.{
+            .main_token = type_token,
+            .payload = .{ .type = type_decl },
         });
     }
 
