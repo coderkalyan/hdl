@@ -141,12 +141,12 @@ pub const Parser = struct {
 
     fn addExtra(p: *Parser, extra: anytype) Allocator.Error!Cst.ExtraIndex {
         const len: u32 = @intCast(p.extra.items.len);
-        const fields = std.meta.fields(@TypeOf(extra));
-        try p.extra.ensureUnusedCapacity(p.gpa, fields.len);
-        inline for (fields) |field| {
-            switch (field.type) {
+        const struct_fields = std.meta.fields(@TypeOf(extra));
+        try p.extra.ensureUnusedCapacity(p.gpa, struct_fields.len);
+        inline for (struct_fields) |struct_field| {
+            switch (struct_field.type) {
                 inline else => {
-                    const num = @intFromEnum(@field(extra, field.name));
+                    const num = @intFromEnum(@field(extra, struct_field.name));
                     p.extra.appendAssumeCapacity(num);
                 },
             }
@@ -640,13 +640,34 @@ pub const Parser = struct {
         });
     }
 
+    fn bundle(p: *Parser) !Cst.Index {
+        const bundle_token = try p.expect(.k_bundle);
+        const fields = try p.parseList(field, .{ .open = .l_brace, .close = .r_brace });
+
+        return p.addNode(.{
+            .main_token = bundle_token,
+            .payload = .{ .bundle = @ptrCast(fields) },
+        });
+    }
+
+    fn field(p: *Parser) !Cst.Index {
+        const ident_token = try p.expect(.ident);
+        _ = try p.expect(.colon);
+        const type_node = try p.typeExpression();
+
+        return p.addNode(.{
+            .main_token = ident_token,
+            .payload = .{ .field = type_node },
+        });
+    }
+
     fn typeExpression(p: *Parser) Error!Cst.Index {
         const node = switch (p.current()) {
             .ident => p.identifier(),
             .l_paren => p.typeParen(),
             .k_module => p.module(),
             // .l_bracket => p.arrayType(),
-            // .k_bundle => p.bundleType(),
+            .k_bundle => p.bundle(),
             // .k_enum => p.enumType(),
             // .k_tagged => p.taggedType(),
             // .k_union => p.unionType(),

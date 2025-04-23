@@ -57,7 +57,8 @@ pub const Item = struct {
         field_init,
         // aggregate types
         array,
-        // bundle,
+        bundle,
+        field,
         // expressions
         unary,
         binary,
@@ -111,6 +112,10 @@ pub const Node = struct {
             // type node for the array element type
             element: Index,
         },
+        // bundle type 'bundle { field: T, ... }'
+        bundle: []const Index,
+        // field inside a bundle
+        field: Index,
 
         // expressions
         // unary expression '[+-~]expr'
@@ -182,6 +187,8 @@ pub const Node = struct {
                 .struct_literal => .struct_literal,
                 .field_init => .field_init,
                 .array => .array,
+                .bundle => .bundle,
+                .field => .field,
                 .unary => .unary,
                 .binary => .binary,
                 .subscript => .subscript,
@@ -206,6 +213,7 @@ pub const Node = struct {
                 .yield,
                 .port,
                 .field_init,
+                .field,
                 => |pl| .{ @intFromEnum(pl), undefined },
                 inline .array,
                 .binary,
@@ -222,6 +230,7 @@ pub const Node = struct {
                 },
                 inline .block,
                 .toplevel,
+                .bundle,
                 => |pl| payload: {
                     const slice = try p.addSlice(@ptrCast(pl));
                     break :payload .{ @intFromEnum(slice), undefined };

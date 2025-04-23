@@ -1,6 +1,5 @@
-// this is a comment
-type FullAdder = (module(a: b1, b: b1, cin: b1) -> (sum: b1, cout: b1) {
+type FullAdder = module(a: b1, b: b1, cin: b1) -> (sum: b1, cout: b1) {
     let sum = a & b & cin;
     let cout = (a & b) | (a & cin) | (b & cin);
     yield .{ .sum = sum, .cout = cout };
-});
+};
