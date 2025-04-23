@@ -36,6 +36,11 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Cst {
     var parser = try Parser.init(gpa, arena.allocator(), source, tokens.slice());
     defer parser.deinit();
 
+    // for (parser.tokens.items(.tag)) |tag| {
+    //     std.debug.print("{} ", .{tag});
+    // }
+    // std.debug.print("\n", .{});
+
     _ = try parser.toplevel();
 
     // copy parser results into an abstract syntax tree

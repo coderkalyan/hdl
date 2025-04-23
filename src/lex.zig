@@ -147,6 +147,7 @@ pub const Lexer = struct {
         ident,
         // annot,
         underscore,
+        slash,
 
         // literals
         radix,
@@ -243,6 +244,9 @@ pub const Lexer = struct {
                     // '@' => {
                     //     state = .annot;
                     // },
+                    '/' => {
+                        state = .slash;
+                    },
 
                     // number literal
                     '0' => {
@@ -534,6 +538,15 @@ pub const Lexer = struct {
                     },
                     else => {
                         result.tag = .r_angle;
+                        break;
+                    },
+                },
+                .slash => switch (c) {
+                    '/' => {
+                        state = .line_comment;
+                    },
+                    else => {
+                        result.tag = .invalid;
                         break;
                     },
                 },
