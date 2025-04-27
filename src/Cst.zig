@@ -71,7 +71,7 @@ pub const Item = struct {
         member,
         // declarations
         signal,
-        type,
+        typedef,
         decl,
         // control flow
         yield,
@@ -148,14 +148,14 @@ pub const Node = struct {
             field: Index,
         },
 
-        // declaration of an (immutable) signal
+        // definition of an (immutable) signal
         signal: struct {
             // null if inferred
             type: Index,
             value: Index,
         },
-        // declaration of a type
-        type: Index,
+        // definition of a type
+        typedef: Index,
         // forward declaration of a signal
         decl: Index,
 
@@ -213,7 +213,7 @@ pub const Node = struct {
                 .subscript => .subscript,
                 .member => .member,
                 .signal => .signal,
-                .type => .type,
+                .typedef => .typedef,
                 .decl => .decl,
                 .yield => .yield,
                 .block => .block,
@@ -230,7 +230,7 @@ pub const Node = struct {
                 .bool,
                 => undefined,
                 inline .unary,
-                .type,
+                .typedef,
                 .yield,
                 .port,
                 .field_init,
