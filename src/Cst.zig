@@ -30,60 +30,15 @@ pub const TokenIndex = enum(u32) { null, _ };
 pub const Index = enum(u32) { null, _ };
 pub const ExtraIndex = enum(u32) { _ };
 
-// represents a slice into the extra array
+// start and end index into the extra data array
 pub const ExtraSlice = struct {
     start: ExtraIndex,
     end: ExtraIndex,
 };
 
-pub const Item = struct {
-    // index to the "main" token representing this node, if applicable.
-    // examples include 'fn' for function declarations, `let` for
-    // const or var declarations, and operator tokens for unary and
-    // binary operations. strings such as identifiers can be extracted
-    // from this information using a fixed offset (i.e. +1 for const decls)
-    tag: Tag,
-    main_token: TokenIndex,
-    payload: [2]u32,
-
-    pub const Tag = enum(u8) {
-        // primary values
-        null,
-        ident,
-        integer,
-        bool,
-        // aggregate values
-        struct_literal,
-        field_init,
-        instance,
-        port_assign,
-        // aggregate types
-        array,
-        bundle,
-        field,
-        @"enum",
-        // expressions
-        unary,
-        binary,
-        // inst,
-        subscript,
-        // slice,
-        member,
-        // declarations
-        signal,
-        typedef,
-        decl,
-        // control flow
-        yield,
-        // @"switch",
-        // structure
-        block,
-        module,
-        port,
-        ports,
-        toplevel,
-    };
-};
+// represents a list of node indices, stored flat in the extra data array
+// alias to the ExtraIndex that stores the ExtraSlice to the list of indices
+pub const Indices = ExtraIndex;
 
 pub const Node = struct {
     main_token: TokenIndex,
@@ -104,13 +59,13 @@ pub const Node = struct {
             // expression node for the struct type
             type: Index,
             // list of field initializers
-            fields: []const Index,
+            fields: Indices,
         },
         // field initializer for struct literals
         field_init: Index,
         // module instantiation
         // NOTE: module type should be a full node to support scoping
-        instance: []const Index,
+        instance: Indices,
         port_assign: Index,
 
         // array type '[n]T'
@@ -121,7 +76,7 @@ pub const Node = struct {
             element_type: Index,
         },
         // bundle type 'bundle { field: T, ... }'
-        bundle: []const Index,
+        bundle: Indices,
         // field inside a bundle
         field: Index,
 
@@ -163,12 +118,12 @@ pub const Node = struct {
         yield: Index,
 
         // block of code (list of nodes)
-        block: []const Index,
+        block: Indices,
 
         @"enum": struct {
             type: Index,
             // list of variants
-            variants: []const Index,
+            variants: Indices,
         },
 
         // hardware module (input, output, block)
@@ -184,96 +139,55 @@ pub const Node = struct {
         // list of input and output ports to a module, effectively the signature
         ports: struct {
             // list of one or more input ports
-            inputs: []const Index,
+            inputs: Indices,
             // list of one or more output ports
-            outputs: []const Index,
+            outputs: Indices,
         },
         // toplevel list of declarations
-        toplevel: []const Index,
+        toplevel: Indices,
     };
+};
 
-    pub fn serialize(node: Node, p: *Parser) !Item {
+// To improve in memory layout of the CST, nodes are flattened into these Items. The
+// underlying data is not changed but is more amenable to struct of arrays (MultiArrayList).
+pub const Item = struct {
+    main_token: TokenIndex,
+    tag: Tag,
+    payload: Payload,
+
+    const u = @typeInfo(Node.Payload).@"union";
+    const Tag = u.tag_type.?;
+    const Payload = @Type(.{ .@"union" = .{
+        .layout = u.layout,
+        .tag_type = null,
+        .fields = u.fields,
+        .decls = &.{},
+    } });
+
+    pub fn serialize(node: Node) Item {
+        const tag = std.meta.activeTag(node.payload);
         return .{
             .main_token = node.main_token,
-            // currently, the tags are trivial mappings but this may change for some encodings
-            .tag = switch (node.payload) {
-                .null => .null,
-                .ident => .ident,
-                .integer => .integer,
-                .bool => .bool,
-                .struct_literal => .struct_literal,
-                .field_init => .field_init,
-                .instance => .instance,
-                .port_assign => .port_assign,
-                .array => .array,
-                .bundle => .bundle,
-                .field => .field,
-                .unary => .unary,
-                .binary => .binary,
-                .subscript => .subscript,
-                .member => .member,
-                .signal => .signal,
-                .typedef => .typedef,
-                .decl => .decl,
-                .yield => .yield,
-                .block => .block,
-                .module => .module,
-                .port => .port,
-                .ports => .ports,
-                .toplevel => .toplevel,
-                .@"enum" => .@"enum",
+            .tag = tag,
+            .payload = switch (tag) {
+                inline else => |t| @unionInit(
+                    Payload,
+                    @tagName(t),
+                    @field(node.payload, @tagName(t)),
+                ),
             },
-            .payload = switch (node.payload) {
-                .null,
-                .ident,
-                .integer,
-                .bool,
-                => undefined,
-                inline .unary,
-                .typedef,
-                .yield,
-                .port,
-                .field_init,
-                .field,
-                .decl,
-                .port_assign,
-                => |pl| .{ @intFromEnum(pl), undefined },
-                inline .array,
-                .binary,
-                .subscript,
-                .member,
-                .signal,
-                .module,
-                => |pl| payload: {
-                    const fields = std.meta.fields(@TypeOf(pl));
-                    break :payload .{
-                        @intFromEnum(@field(pl, fields[0].name)),
-                        @intFromEnum(@field(pl, fields[1].name)),
-                    };
-                },
-                inline .block,
-                .toplevel,
-                .bundle,
-                .instance,
-                => |pl| payload: {
-                    const slice = try p.addSlice(@ptrCast(pl));
-                    break :payload .{ @intFromEnum(slice), undefined };
-                },
-                .struct_literal => |pl| payload: {
-                    const struct_type = @intFromEnum(pl.type);
-                    const fields = try p.addSlice(@ptrCast(pl.fields));
-                    break :payload .{ struct_type, @intFromEnum(fields) };
-                },
-                .ports => |ports| payload: {
-                    const inputs = try p.addSlice(@ptrCast(ports.inputs));
-                    const outputs = try p.addSlice(@ptrCast(ports.outputs));
-                    break :payload .{ @intFromEnum(inputs), @intFromEnum(outputs) };
-                },
-                .@"enum" => |pl| payload: {
-                    const enum_type = @intFromEnum(pl.type);
-                    const variants = try p.addSlice(@ptrCast(pl.variants));
-                    break :payload .{ enum_type, @intFromEnum(variants) };
-                },
+        };
+    }
+
+    pub fn deserialize(item: Item) Node {
+        return .{
+            .main_token = item.main_token,
+            .payload = switch (item.tag) {
+                inline else => |t| @unionInit(
+                    Node.Payload,
+                    @tagName(t),
+                    @field(item, @tagName(t)),
+                ),
             },
         };
     }

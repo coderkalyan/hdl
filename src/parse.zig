@@ -8,6 +8,7 @@ const Token = lex.Token;
 const Node = Cst.Node;
 const TokenIndex = Cst.TokenIndex;
 const Index = Cst.Index;
+const Indices = Cst.Indices;
 const Item = Cst.Item;
 
 pub const Error = error{UnexpectedToken} || Allocator.Error;
@@ -104,7 +105,7 @@ pub const Parser = struct {
 
     fn addNode(p: *Parser, node: Node) !Index {
         const len: u32 = @intCast(p.items.len);
-        const item = try node.serialize(p);
+        const item = Cst.Item.serialize(node);
         try p.items.append(p.gpa, item);
         return @enumFromInt(len);
     }
@@ -168,27 +169,29 @@ pub const Parser = struct {
         return p.source[token.loc.start..token.loc.end];
     }
 
-    pub fn extraSlice(p: *Parser, sl: Cst.ExtraSlice) []const u32 {
-        const start: u32 = @intFromEnum(sl.start);
-        const end: u32 = @intFromEnum(sl.end);
-        return p.extra.items[start..end];
+    pub fn indices(p: *Parser, ids: Cst.Indices) []const Index {
+        const slice = p.extraData(ids, Cst.ExtraSlice);
+        const start: u32 = @intFromEnum(slice.start);
+        const end: u32 = @intFromEnum(slice.end);
+        return @ptrCast(p.extra.items[start..end]);
     }
 
-    pub fn addSlice(p: *Parser, sl: []const u32) !Cst.ExtraIndex {
+    pub fn addIndices(p: *Parser, ids: []const Index) !Cst.Indices {
         const start: u32 = @intCast(p.extra.items.len);
-        try p.extra.appendSlice(p.gpa, sl);
+        try p.extra.appendSlice(p.gpa, @ptrCast(ids));
         const end: u32 = @intCast(p.extra.items.len);
+
         return p.addExtra(Cst.ExtraSlice{
             .start = @enumFromInt(start),
             .end = @enumFromInt(end),
         });
     }
 
-    fn parseList(p: *Parser, comptime element: anytype, surround: struct { open: Token.Tag, close: Token.Tag }) ![]const Cst.Index {
+    fn parseList(p: *Parser, comptime element: anytype, surround: struct { open: Token.Tag, close: Token.Tag }) !Indices {
         _ = try p.expect(surround.open);
 
         const scratch_top = p.scratch.items.len;
-        // defer p.scratch.shrinkRetainingCapacity(scratch_top);
+        defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
         while (true) {
             if (p.eat(surround.close)) |_| break;
@@ -203,7 +206,7 @@ pub const Parser = struct {
         }
 
         const elements = p.scratch.items[scratch_top..];
-        return @ptrCast(elements);
+        return p.addIndices(@ptrCast(elements));
     }
 
     const min_precedence: i32 = 0;
@@ -242,9 +245,10 @@ pub const Parser = struct {
         }
 
         const stmts: []const Index = @ptrCast(p.scratch.items[scratch_top..]);
+        const ids = try p.addIndices(stmts);
         return p.addNode(.{
             .main_token = .null,
-            .payload = .{ .toplevel = stmts },
+            .payload = .{ .toplevel = ids },
         });
     }
 
@@ -261,9 +265,10 @@ pub const Parser = struct {
         }
 
         const stmts: []const Index = @ptrCast(p.scratch.items[scratch_top..]);
+        const ids = try p.addIndices(stmts);
         return p.addNode(.{
             .main_token = block_token,
-            .payload = .{ .block = stmts },
+            .payload = .{ .block = ids },
         });
     }
 
@@ -383,7 +388,7 @@ pub const Parser = struct {
 
         return p.addNode(.{
             .main_token = ident_token,
-            .payload = .{ .instance = @ptrCast(assignments) },
+            .payload = .{ .instance = assignments },
         });
     }
 
@@ -433,7 +438,7 @@ pub const Parser = struct {
             .payload = .{
                 .struct_literal = .{
                     .type = type_node,
-                    .fields = @ptrCast(fields),
+                    .fields = fields,
                 },
             },
         });
@@ -504,8 +509,8 @@ pub const Parser = struct {
             .main_token = l_paren_token,
             .payload = .{
                 .ports = .{
-                    .inputs = @ptrCast(inputs),
-                    .outputs = @ptrCast(outputs),
+                    .inputs = inputs,
+                    .outputs = outputs,
                 },
             },
         });
@@ -596,7 +601,7 @@ pub const Parser = struct {
 
         return p.addNode(.{
             .main_token = bundle_token,
-            .payload = .{ .bundle = @ptrCast(fields) },
+            .payload = .{ .bundle = fields },
         });
     }
 
