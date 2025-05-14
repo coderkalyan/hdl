@@ -45,8 +45,10 @@ pub const Node = struct {
     payload: Payload,
 
     pub const Payload = union(enum) {
-        // empty node at the beginning
+        // empty node at the beginning - used to fill .null enum slot
         null,
+
+        // leaf nodes - these correspond to simple values and tokens
         // a single "named" thing like a variable, field, or type name
         ident,
         // an integer literal, in any base
@@ -54,65 +56,122 @@ pub const Node = struct {
         // a boolean literal, 'true' or 'false'
         bool,
 
-        // struct literal
-        struct_literal: struct {
-            // expression node for the struct type
+        // bundle related nodes
+        // bundle type 'bundle { field: T, ... }'
+        // each child index in the bundle is a field
+        // bundles are anonymous (unless assigned to a named type alias)
+        bundle: Indices,
+        // a bundle contains zero or more of these fields,
+        // each corresponding to a named and typed member of the bundle
+        // main_token is the field name, and the index is the type
+        field: Index,
+        // bundle literals initialize a value of a bundle type, either
+        // with a named type 'Request { .address = 0x1234, ... }'
+        // or anonymously '.{ .address = 0x1234, ... }'
+        bundle_literal: struct {
+            // expression node for the bundle type
+            // if anonymous, this is .null
             type: Index,
             // list of field initializers
-            fields: Indices,
+            inits: Indices,
         },
-        // field initializer for struct literals
+        // each initializer in the bundle literal is a named
+        // field assignment '.field = expr'
+        // main_token is the field name, and the index is the value
         field_init: Index,
-        // module instantiation
-        // NOTE: module type should be a full node to support scoping
-        instance: Indices,
-        port_assign: Index,
 
+        // array related nodes
         // array type '[n]T'
         array: struct {
-            // expression node for the array size
-            count: Index,
-            // type node for the array element type
-            element_type: Index,
+            // expression node for the array length
+            len: Index,
+            // type node for the array child type
+            child: Index,
         },
-        // bundle type 'bundle { field: T, ... }'
-        bundle: Indices,
-        // field inside a bundle
-        field: Index,
+        // array literal '[expr, expr, ...]'
+        array_literal: Indices,
+
+        // module related nodes
+        // module type 'module(inputs...) -> output { block }'
+        module: struct {
+            // list of input ports and output port
+            ports: Index,
+            // body block
+            body: Index,
+        },
+        // list of input and output ports to a module, effectively the signature
+        ports: struct {
+            // list of zero or more named input ports
+            inputs: Indices,
+            // output port type (output port not named since only one)
+            output: Index,
+        },
+        // input port to a module
+        // main_token is the port name and the index is the type
+        input: Index,
+        // module instantiation literal 'Foo(input=expr, ...)'
+        module_literal: struct {
+            // module type being instantiated
+            type: Index,
+            // list of input port initializers
+            inits: Indices,
+        },
+        // each input initializer is a named port assignment
+        // 'port=expr'
+        input_init: Index,
 
         // expressions
-        // unary expression '[+-~]expr'
+        // unary expression '[-~]expr'
+        // list of unary expressions:
+        // -   integer negation
+        // ~   bitwise complement
+        // not logical negation
         unary: Index,
         // binary expression 'expr [+-&|...] expr'
+        // list of binary expressions:
+        // +       integer addition
+        // -       integer subtraction
+        // &       bitwise and
+        // |       bitwise or
+        // ^       bitwise xor
+        // and     logical and
+        // or      logical or
+        // xor     logical exclusive or
+        // implies logical implication
         binary: struct {
             l: Index,
             r: Index,
         },
-        // subscript (element access in array or value)
+        // subscript (array element access by index)
         subscript: struct {
-            // expression node for the array/value
+            // expression node for the array
             value: Index,
             // expression node for the index
             index: Index,
         },
-        // member (element access in a bundle)
-        member: struct {
-            // expression node for the bundle
-            bundle: Index,
-            // expression node for the field name
-            field: Index,
-        },
+        // member (bundle field access by name)
+        // main_token is the field name, and the index is the bundle expression
+        member: Index,
 
-        // definition of an (immutable) signal
-        signal: struct {
-            // null if inferred
+        // definition of an signal 'let signal[: type] = expr'
+        // all signals are immutable once defined (SSA form)
+        // main_token is the `let` which can be used to seek to the name token
+        def: struct {
+            // type expression node, null if inferred
             type: Index,
+            // value expression node
             value: Index,
         },
-        // definition of a type
-        typedef: Index,
         // forward declaration of a signal
+        // this is used for (usually sequential) feedback loops
+        // main_token is the `decl` which can be used to seek to the name token
+        // no value here, so the index is the type
         decl: Index,
+        // definition of a named type alias
+        // all types are anonymous by default
+        // main_token is the `type` which can be used to seek to the name token
+        // the index is the type expression
+        type: Index,
 
         // yields a value from an expression block
         yield: Index,
@@ -120,30 +179,14 @@ pub const Node = struct {
         // block of code (list of nodes)
         block: Indices,
 
-        @"enum": struct {
-            type: Index,
-            // list of variants
-            variants: Indices,
-        },
+        // @"enum": struct {
+        //     type: Index,
+        //     // list of variants
+        //     variants: Indices,
+        // },
 
-        // hardware module (input, output, block)
-        module: struct {
-            // list of input and output ports
-            ports: Index,
-            // body block
-            body: Index,
-        },
-        // named input or output to a module
-        // main_token references name, payload is the type
-        port: Index,
-        // list of input and output ports to a module, effectively the signature
-        ports: struct {
-            // list of one or more input ports
-            inputs: Indices,
-            // list of one or more output ports
-            outputs: Indices,
-        },
-        // toplevel list of declarations
+        // toplevel list of statements, similar to block
+        // but can only hold type declarations and imports
         toplevel: Indices,
     };
 };
