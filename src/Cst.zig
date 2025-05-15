@@ -124,7 +124,7 @@ pub const Node = struct {
         // unary expression '[-~]expr'
         // list of unary expressions:
         // -   integer negation
-        // ~   bitwise complement
+        // ~   bitwise negation
         // not logical negation
         unary: Index,
         // binary expression 'expr [+-&|...] expr'
@@ -243,7 +243,7 @@ pub const Item = struct {
 source: [:0]const u8,
 tokens: TokenList.Slice,
 items: std.MultiArrayList(Item).Slice,
-extra: []u32,
+extra: []const u32,
 
 pub fn deinit(self: *Cst, gpa: Allocator) void {
     gpa.free(self.source);
@@ -262,7 +262,7 @@ pub fn extraData(self: *const Cst, index: usize, comptime T: type) T {
     return result;
 }
 
-pub fn extraSlice(tree: *const Cst, sl: Cst.Node.ExtraSlice) []const u32 {
+pub fn extraSlice(tree: *const Cst, sl: ExtraSlice) []const u32 {
     const start: u32 = @intCast(sl.start);
     const end: u32 = @intCast(sl.end);
     return tree.extra[start..end];
@@ -277,7 +277,7 @@ pub fn tokenString(tree: *const Cst, index: TokenIndex) []const u8 {
     return tree.source[token.loc.start..token.loc.end];
 }
 
-pub fn mainToken(tree: *const Cst, node: Node.Index) TokenIndex {
+pub fn mainToken(tree: *const Cst, node: Index) TokenIndex {
     return tree.nodes.items(.main_token)[node];
 }
 
@@ -285,6 +285,6 @@ pub fn tokenTag(tree: *const Cst, index: TokenIndex) Token.Tag {
     return tree.tokens.items(.tag)[index];
 }
 
-pub fn data(tree: *const Cst, node: Node.Index) Node.Data {
+fn data(tree: *const Cst, node: Index) Node.Data {
     return tree.nodes.items(.data)[node];
 }
