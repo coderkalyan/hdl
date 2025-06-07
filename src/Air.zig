@@ -4,8 +4,51 @@ const InternPool = @import("InternPool.zig");
 const Allocator = std.mem.Allocator;
 const Air = @This();
 
-pub const Index = enum(u32) { null, _ };
+// Indices are 31 bits so the upper bit can be used to discriminate
+// between runtime (air indices) and compile time (intern pool indices)
+pub const Index = enum(u31) { null, _ };
 pub const ExtraIndex = enum(u32) { null, _ };
+
+pub const Value = packed struct(u32) {
+    tag: Tag,
+    payload: Payload,
+
+    pub const Tag = enum(u1) {
+        index,
+        ip,
+    };
+
+    pub const Payload = packed union {
+        index: Index,
+        ip: InternPool.Index,
+    };
+
+    pub const Tagged = union(enum) {
+        index: Index,
+        ip: InternPool.Index,
+    };
+
+    pub fn index(i: Index) Value {
+        return .{
+            .tag = .index,
+            .payload = .{ .index = i },
+        };
+    }
+
+    pub fn ip(i: InternPool.Index) Value {
+        return .{
+            .tag = .ip,
+            .payload = .{ .ip = i },
+        };
+    }
+
+    pub fn tagged(value: Value) Tagged {
+        switch (value.tag) {
+            .index => |i| .{ .index = i },
+            .ip => |i| .{ .ip = i },
+        }
+    }
+};
 
 // start and end index into the extra data array
 pub const ExtraSlice = struct {
@@ -46,7 +89,7 @@ pub const Node = union(enum) {
     // each initializer in the bundle literal is a named
     // field assignment '.field = expr'
     // main_token is the field name, and the index is the value
-    field_init: Index,
+    field_init: Value,
 
     // typed array literal '[expr, expr, ...]'
     array_literal: struct {
@@ -65,16 +108,18 @@ pub const Node = union(enum) {
     // 'port=expr'
     input_init: struct {
         type: InternPool.Index,
-        value: Index,
+        value: Value,
     },
 
     // unary prefix operators
     // integer negation
-    ineg: Index,
+    ineg: Value,
     // bitwise negation
-    bnot: Index,
+    bnot: Value,
     // logical negation
-    lnot: Index,
+    lnot: Value,
+    // parentheses (structural annotation, no hardware operation)
+    paren: Value,
 
     // binary operators
     // integer addition
@@ -99,15 +144,15 @@ pub const Node = union(enum) {
     // subscript (array element access by index)
     subscript: struct {
         // expression node for the array
-        value: Index,
+        value: Value,
         // expression node for the index
-        index: Index,
+        index: Value,
     },
 
     // member (bundle field access by name)
     member: struct {
         // expression node for the bundle
-        value: Index,
+        value: Value,
         // field name
         name: InternPool.Index,
     },
@@ -119,7 +164,7 @@ pub const Node = union(enum) {
         // data type is Signal
         signal: ExtraIndex,
         // value expression node
-        value: Index,
+        value: Value,
     },
 
     // forward declaration of a signal
@@ -128,8 +173,19 @@ pub const Node = union(enum) {
     // no value here, so the index is the type
     decl: Signal,
 
+    // reference to a module parameter by index
+    // the identifier name is also cached here
+    param: struct {
+        // index of the parameter in the current module scope
+        index: u32,
+        // identifier name of the underlying parameter
+        // this is equivalent to the name field stored in the
+        // module type at the specified index
+        name: InternPool.Index,
+    },
+
     // yields a value from an expression block
-    yield: Index,
+    yield: Value,
 
     // block of code (list of nodes)
     block: Indices,
@@ -139,8 +195,8 @@ pub const Node = union(enum) {
     toplevel: Indices,
 
     pub const Binary = struct {
-        l: Index,
-        r: Index,
+        l: Value,
+        r: Value,
     };
 
     pub const Signal = struct {
@@ -151,6 +207,7 @@ pub const Node = union(enum) {
 
 nodes: std.MultiArrayList(Node).Slice,
 extra: []const u32,
+body: Index,
 
 pub fn deinit(self: *Air, gpa: Allocator) void {
     self.nodes.deinit(gpa);

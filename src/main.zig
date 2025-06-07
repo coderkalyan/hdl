@@ -2,6 +2,8 @@ const std = @import("std");
 const lex = @import("lex.zig");
 const Cst = @import("Cst.zig");
 const parse = @import("parse.zig");
+const InternPool = @import("InternPool.zig");
+const Sema = @import("Sema.zig");
 
 const io = std.io;
 const max_file_size = std.math.maxInt(u32);
@@ -46,4 +48,9 @@ pub fn main() !void {
     // the Cst owns the source
     var tree = try parse.parse(gpa, source);
     defer tree.deinit(gpa);
+
+    var pool = try InternPool.init(gpa);
+    defer pool.deinit();
+
+    try Sema.analyze(gpa, &pool, &tree);
 }

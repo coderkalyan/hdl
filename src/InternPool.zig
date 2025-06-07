@@ -80,7 +80,7 @@ pub const Key = union(enum) {
 
         switch (a_tag) {
             .ty => return a.ty.eql(b.ty),
-            inline .tv, .ir => |tag| {
+            inline .tv, .air => |tag| {
                 const a_data = @field(a, @tagName(tag));
                 const b_data = @field(b, @tagName(tag));
                 return std.meta.eql(a_data, b_data);
@@ -99,9 +99,12 @@ pub const Item = struct {
         uint_ty,
         sint_ty,
         bool_ty,
+        bundle_ty,
+        module_ty,
         int_ty,
         int_tv,
         // bool_tv,
+        str,
         air,
     };
 
@@ -130,25 +133,35 @@ pub const Item = struct {
         }
     };
 
+    pub const Bundle = struct {
+        field_names: Index.Slice,
+        field_types: Index.Slice,
+    };
+
+    pub const Module = struct {
+        input_names: Index.Slice,
+        input_types: Index.Slice,
+        output_type: Index,
+    };
+
     pub const ExtraSlice = struct {
         start: ExtraIndex,
         end: ExtraIndex,
     };
 };
 
-pub const Index = enum(u32) {
+// Indices are 31 bits so the upper bit can be used to discriminate
+// between runtime (air indices) and compile time (intern pool indices)
+pub const Index = enum(u31) {
     // common items are created at init time and given
     // reserved indices
-    bits,
-    uint,
-    sint,
-    bool,
     int,
+    bool,
 
     izero,
     ione,
-    true,
-    false,
+    // true,
+    // false,
 
     // builtin_int,
     // builtin_float,
@@ -158,6 +171,11 @@ pub const Index = enum(u32) {
     // builtin_append,
 
     _,
+
+    pub const Slice = struct {
+        start: ExtraIndex,
+        end: ExtraIndex,
+    };
 };
 
 const IndexContext = struct {
@@ -190,21 +208,12 @@ const SliceAdapter = struct {
 };
 
 const static_keys = [_]Key{
-    .{ .ty = Type.common.bits },
-    .{ .ty = Type.common.uint },
-    .{ .ty = Type.common.sint },
-    .{ .ty = Type.common.bool },
     .{ .ty = Type.common.int },
-    .{ .tv = TypedValue.common.true },
-    .{ .tv = TypedValue.common.false },
+    .{ .ty = Type.common.bool },
     .{ .tv = TypedValue.common.izero },
     .{ .tv = TypedValue.common.ione },
-    // .{ .str = "int" },
-    // .{ .str = "float" },
-    // .{ .str = "bool" },
-    // .{ .str = "print" },
-    // .{ .str = "len" },
-    // .{ .str = "append" },
+    // .{ .tv = TypedValue.common.true },
+    // .{ .tv = TypedValue.common.false },
 };
 
 pub fn init(gpa: Allocator) !InternPool {
@@ -234,48 +243,43 @@ pub fn deinit(pool: *InternPool) void {
     pool.string_table.deinit(gpa);
 }
 
-fn addExtra(pool: *InternPool, extra: anytype) !ExtraIndex {
-    const fields = std.meta.fields(@TypeOf(extra));
-    try pool.extra.ensureUnusedCapacity(pool.gpa, fields.len);
-    const len: u32 = @intCast(pool.extra.items.len);
-    inline for (fields) |field| {
-        switch (field.type) {
-            inline else => {
-                const num: u32 = @intFromEnum(@field(extra, field.name));
-                pool.extra.appendAssumeCapacity(@bitCast(num));
-            },
-        }
-    }
+pub fn addExtra(pool: *InternPool, extra: anytype) !ExtraIndex {
+    std.debug.assert(@alignOf(@TypeOf(extra)) >= 4);
 
+    const words: []const u32 = @ptrCast(std.mem.asBytes(&extra));
+    const len: u32 = @intCast(pool.extra.items.len);
+    try pool.extra.appendSlice(pool.gpa, words);
     return @enumFromInt(len);
 }
 
 pub fn extraData(pool: *const InternPool, index: ExtraIndex, comptime T: type) T {
-    const fields = std.meta.fields(T);
+    std.debug.assert(@alignOf(T) >= 4);
+
     var result: T = undefined;
-    const base: u32 = @intFromEnum(index);
-    inline for (fields, 0..) |field, i| {
-        switch (field.type) {
-            inline else => @field(result, field.name) = @enumFromInt(pool.extra.items[base + i]),
-        }
-    }
+    const dst: []u32 = @ptrCast(std.mem.asBytes(&result));
+    const start: u32 = @intFromEnum(index);
+    const size = @sizeOf(T) / @sizeOf(u32);
+    const src: []const u32 = pool.extra.items[start .. start + size];
+    @memcpy(dst, src);
+
     return result;
 }
 
-pub fn addSlice(pool: *InternPool, sl: []const u32) !ExtraIndex {
+pub fn addSlice(pool: *InternPool, sl: []const u32) !Index.Slice {
     const start: u32 = @intCast(pool.extra.items.len);
     try pool.extra.appendSlice(pool.gpa, sl);
     const end: u32 = @intCast(pool.extra.items.len);
-    return pool.addExtra(Item.ExtraSlice{
+
+    return .{
         .start = @enumFromInt(start),
         .end = @enumFromInt(end),
-    });
+    };
 }
 
-pub fn extraSlice(pool: *const InternPool, sl: Item.ExtraSlice) []const u32 {
+pub fn extraSlice(pool: *const InternPool, sl: Index.Slice) []const Index {
     const start: u32 = @intFromEnum(sl.start);
     const end: u32 = @intFromEnum(sl.end);
-    return pool.extra.items[start..end];
+    return @ptrCast(pool.extra.items[start..end]);
 }
 
 pub fn put(pool: *InternPool, key: Key) !Index {
@@ -303,6 +307,8 @@ pub fn get(pool: *const InternPool, _index: Index) Key {
         .sint_ty,
         .bool_ty,
         .int_ty,
+        .bundle_ty,
+        .module_ty,
         => .{ .ty = Type.deserialize(item, pool) },
         .int_tv,
         // .bool_tv,

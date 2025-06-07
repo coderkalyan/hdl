@@ -3,6 +3,7 @@ const InternPool = @import("InternPool.zig");
 
 const Allocator = std.mem.Allocator;
 const Item = InternPool.Item;
+const Index = InternPool.Index;
 const asBytes = std.mem.asBytes;
 
 pub const Type = union(enum) {
@@ -16,9 +17,17 @@ pub const Type = union(enum) {
     bool: void,
     // compile time integer, no width and not synthesizable
     int: void,
-    // list: InternPool.Index,
-    // @"union": []const InternPool.Index,
-    // any: void,
+    // hardware bundle of nets
+    bundle: struct {
+        field_names: []const Index,
+        field_types: []const Index,
+    },
+    // hardware module
+    module: struct {
+        input_names: []const Index,
+        input_types: []const Index,
+        output_type: Index,
+    },
 
     pub const Tag = std.meta.Tag(Type);
 
@@ -26,53 +35,72 @@ pub const Type = union(enum) {
     // storage. Extra serialization storage is available via
     // the .extra and .wide arrays owned by the pool.
     pub fn serialize(ty: Type, pool: *InternPool) !Item {
-        _ = pool;
         return switch (ty) {
             .bits => |width| .{ .tag = .bits_ty, .payload = .{ .width = width } },
             .uint => |width| .{ .tag = .uint_ty, .payload = .{ .width = width } },
             .sint => |width| .{ .tag = .sint_ty, .payload = .{ .width = width } },
             .bool => .{ .tag = .bool_ty, .payload = .{ .placeholder = {} } },
             .int => .{ .tag = .int_ty, .payload = .{ .placeholder = {} } },
-            // .list => |ip| .{ .tag = .list_ty, .payload = .{ .ip = ip } },
-            // .@"union" => |types| {
-            //     const slice = try pool.addSlice(@ptrCast(types));
-            //     return .{ .tag = .union_ty, .payload = .{ .extra = slice } };
-            // },
-            // .object => |fields| {
-            //     const ptr = asBytes(fields.ptr);
-            //     comptime std.debug.assert(@alignOf(InternPool.Index) == @alignOf(Attribute));
-            //     const ips: [*]const InternPool.Index = @ptrCast(ptr);
-            //     // std.debug.print("{any}\n", .{ips[0 .. fields.len * 2]});
-            //     const slice = try pool.addSlice(@ptrCast(ips[0 .. fields.len * 2]));
-            //     return .{ .tag = .object_ty, .payload = .{ .extra = slice } };
-            // },
-            // .any => .{ .tag = .any_ty, .payload = .{ .placeholder = {} } },
+            .bundle => |bundle| bundle: {
+                const extra = try pool.addExtra(Item.Bundle{
+                    .field_names = try pool.addSlice(@ptrCast(bundle.field_names)),
+                    .field_types = try pool.addSlice(@ptrCast(bundle.field_types)),
+                });
+
+                break :bundle .{
+                    .tag = .bundle_ty,
+                    .payload = .{ .extra = extra },
+                };
+            },
+            .module => |module| module: {
+                const extra = try pool.addExtra(Item.Module{
+                    .input_names = try pool.addSlice(@ptrCast(module.input_names)),
+                    .input_types = try pool.addSlice(@ptrCast(module.input_types)),
+                    .output_type = module.output_type,
+                });
+
+                break :module .{
+                    .tag = .module_ty,
+                    .payload = .{ .extra = extra },
+                };
+            },
         };
     }
 
     // converts an InternPool.Item back into a Type. It is invalid
     // to call this function on an Item that is not a Type.
     pub fn deserialize(item: Item, pool: *const InternPool) Type {
-        _ = pool;
         return switch (item.tag) {
             .bits_ty => .{ .bits = item.payload.width },
             .uint_ty => .{ .uint = item.payload.width },
             .sint_ty => .{ .sint = item.payload.width },
             .bool_ty => .{ .bool = {} },
             .int_ty => .{ .int = {} },
-            // .union_ty => {
-            //     const slice = pool.extraData(item.payload.extra, Item.ExtraSlice);
-            //     return .{ .@"union" = @ptrCast(pool.extraSlice(slice)) };
-            // },
-            // .object_ty => {
-            //     const slice = pool.extraData(item.payload.extra, Item.ExtraSlice);
-            //     const ips: []const InternPool.Index = @ptrCast(pool.extraSlice(slice));
-            //     const ptr = asBytes(ips.ptr);
-            //     const fields: [*]const Attribute = @ptrCast(ptr);
-            //     // std.debug.print("{any}\n", .{fields[0 .. ips.len / 2]});
-            //     return .{ .object = @ptrCast(fields[0 .. ips.len / 2]) };
-            // },
-            // .any_ty => .{ .any = {} },
+            .bundle_ty => type: {
+                const bundle = pool.extraData(item.payload.extra, Item.Bundle);
+                const field_names: []const Index = pool.extraSlice(bundle.field_names);
+                const field_types: []const Index = pool.extraSlice(bundle.field_types);
+
+                break :type .{
+                    .bundle = .{
+                        .field_names = field_names,
+                        .field_types = field_types,
+                    },
+                };
+            },
+            .module_ty => type: {
+                const module = pool.extraData(item.payload.extra, Item.Module);
+                const input_names: []const Index = pool.extraSlice(module.input_names);
+                const input_types: []const Index = pool.extraSlice(module.input_types);
+
+                break :type .{
+                    .module = .{
+                        .input_names = input_names,
+                        .input_types = input_types,
+                        .output_type = module.output_type,
+                    },
+                };
+            },
             else => unreachable,
         };
     }
@@ -84,9 +112,15 @@ pub const Type = union(enum) {
         switch (ty) {
             .bits, .uint, .sint => |width| hasher.update(asBytes(&width)),
             .bool, .int => {},
-            // inline .@"union", .object => |items| {
-            //     for (items) |*item| hasher.update(asBytes(item));
-            // },
+            .bundle => |bundle| {
+                for (bundle.field_names) |*field| hasher.update(asBytes(field));
+                for (bundle.field_types) |*field| hasher.update(asBytes(field));
+            },
+            .module => |module| {
+                for (module.input_names) |*field| hasher.update(asBytes(field));
+                for (module.input_types) |*field| hasher.update(asBytes(field));
+                hasher.update(asBytes(&module.output_type));
+            },
         }
 
         return hasher.final();
@@ -98,14 +132,11 @@ pub const Type = union(enum) {
         if (a_tag != b_tag) return false;
 
         return switch (a_tag) {
-            // .@"union" => std.mem.eql(InternPool.Index, a.@"union", b.@"union"),
-            // .object => {
-            //     if (a.object.len != b.object.len) return false;
-            //     for (a.object, b.object) |a_attr, b_attr| {
-            //         if (!std.meta.eql(a_attr, b_attr)) return false;
-            //     }
-            //     return true;
-            // },
+            .bundle => {
+                if (!std.mem.eql(Index, a.bundle.field_names, b.bundle.field_names)) return false;
+                if (!std.mem.eql(Index, a.bundle.field_types, b.bundle.field_types)) return false;
+                return true;
+            },
             inline else => std.meta.eql(a, b),
         };
     }

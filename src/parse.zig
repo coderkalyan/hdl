@@ -42,7 +42,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Cst {
     // }
     // std.debug.print("\n", .{});
 
-    _ = try parser.toplevel();
+    const root = try parser.root();
 
     // copy parser results into an abstract syntax tree
     // that owns the source, token list, node list, and node extra data
@@ -51,6 +51,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Cst {
         .tokens = tokens.toOwnedSlice(),
         .items = parser.items.toOwnedSlice(),
         .extra = try parser.extra.toOwnedSlice(gpa),
+        .root = root,
     };
 }
 
@@ -671,7 +672,7 @@ pub const Parser = struct {
         });
     }
 
-    pub fn toplevel(p: *Parser) !Index {
+    pub fn root(p: *Parser) !Index {
         const scratch_top = p.scratch.items.len;
         defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
@@ -689,7 +690,7 @@ pub const Parser = struct {
         const ids = try p.addIndices(stmts);
         return p.addNode(.{
             .main_token = .null,
-            .payload = .{ .toplevel = ids },
+            .payload = .{ .root = ids },
         });
     }
 };

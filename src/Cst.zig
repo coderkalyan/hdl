@@ -15,8 +15,10 @@ const Cst = @This();
 // therefore, we instead re-lex a single token to get the
 // end offset/length as necessary
 pub const Token = struct {
-    tag: lex.Token.Tag,
+    tag: Tag,
     start: ByteOffset,
+
+    pub const Tag = lex.Token.Tag;
 };
 
 // we store an array of token tags and start locations
@@ -26,7 +28,16 @@ pub const Token = struct {
 // any strings, but reference character offsets in the global
 // source array.
 pub const TokenList = std.MultiArrayList(Token);
-pub const TokenIndex = enum(u32) { null, _ };
+pub const TokenIndex = enum(u32) {
+    null,
+    _,
+
+    pub fn advance(index: TokenIndex, offset: u32) TokenIndex {
+        const i = @intFromEnum(index);
+        return @enumFromInt(i + offset);
+    }
+};
+
 pub const Index = enum(u32) { null, _ };
 pub const ExtraIndex = enum(u32) { _ };
 
@@ -187,7 +198,7 @@ pub const Node = struct {
 
         // toplevel list of statements, similar to block
         // but can only hold type declarations and imports
-        toplevel: Indices,
+        root: Indices,
     };
 };
 
@@ -229,7 +240,7 @@ pub const Item = struct {
                 inline else => |t| @unionInit(
                     Node.Payload,
                     @tagName(t),
-                    @field(item, @tagName(t)),
+                    @field(item.payload, @tagName(t)),
                 ),
             },
         };
@@ -239,11 +250,11 @@ pub const Item = struct {
 // represents the entire, immutable, CST of a source file, once parsed.
 // in-progess mutable parsing data is stored in the `Parser` struct in
 // parser.zig. the CST owns the source
-// extra data
 source: [:0]const u8,
 tokens: TokenList.Slice,
 items: std.MultiArrayList(Item).Slice,
 extra: []const u32,
+root: Index,
 
 pub fn deinit(self: *Cst, gpa: Allocator) void {
     gpa.free(self.source);
@@ -252,39 +263,50 @@ pub fn deinit(self: *Cst, gpa: Allocator) void {
     gpa.free(self.extra);
 }
 
-pub fn extraData(self: *const Cst, index: usize, comptime T: type) T {
+pub fn extraData(tree: *const Cst, index: ExtraIndex, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields, 0..) |field, i| {
-        comptime std.debug.assert(field.type == Node.Index);
-        @field(result, field.name) = self.extra[index + i];
+        // comptime std.debug.assert(field.type == Index);
+        @field(result, field.name) = @enumFromInt(tree.extra[@intFromEnum(index) + i]);
     }
     return result;
 }
 
-pub fn extraSlice(tree: *const Cst, sl: ExtraSlice) []const u32 {
-    const start: u32 = @intCast(sl.start);
-    const end: u32 = @intCast(sl.end);
-    return tree.extra[start..end];
+pub fn indices(tree: *const Cst, ids: Cst.Indices) []const Index {
+    const slice = tree.extraData(ids, Cst.ExtraSlice);
+    const start: u32 = @intFromEnum(slice.start);
+    const end: u32 = @intFromEnum(slice.end);
+    return @ptrCast(tree.extra[start..end]);
+}
+
+pub fn mainToken(tree: *const Cst, node: Index) TokenIndex {
+    return tree.items.items(.main_token)[@intFromEnum(node)];
+}
+
+pub fn data(tree: *const Cst, node: Index) Node {
+    const item = tree.items.get(@intFromEnum(node));
+    return item.deserialize();
+}
+
+pub fn payload(tree: *const Cst, node: Index) Node.Payload {
+    const index = @intFromEnum(node);
+    const tag = tree.items.items(.tag)[index];
+    const pl = tree.items.items(.payload)[index];
+
+    const deserialized = Item.deserialize(.{ .main_token = .null, .tag = tag, .payload = pl });
+    return deserialized.payload;
 }
 
 pub fn tokenString(tree: *const Cst, index: TokenIndex) []const u8 {
     const tokens = tree.tokens;
-    const token_start = tokens.items(.start)[index];
-    var lexer = Lexer.init_index(tree.source, token_start);
+    const token_start = tokens.items(.start)[@intFromEnum(index)];
+    var lexer = Lexer.initIndex(tree.source, token_start);
     const token = lexer.next();
 
     return tree.source[token.loc.start..token.loc.end];
 }
 
-pub fn mainToken(tree: *const Cst, node: Index) TokenIndex {
-    return tree.nodes.items(.main_token)[node];
-}
-
 pub fn tokenTag(tree: *const Cst, index: TokenIndex) Token.Tag {
-    return tree.tokens.items(.tag)[index];
-}
-
-fn data(tree: *const Cst, node: Index) Node.Data {
-    return tree.nodes.items(.data)[node];
+    return tree.tokens.items(.tag)[@intFromEnum(index)];
 }

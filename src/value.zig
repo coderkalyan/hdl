@@ -57,7 +57,6 @@ pub const TypedValue = struct {
         hasher.update(asBytes(&tv.ty));
 
         switch (tv.val) {
-            .none => {},
             inline else => |val| hasher.update(asBytes(&val)),
         }
 
