@@ -58,7 +58,7 @@ const Sema = struct {
     // FIXME: this is unsafe because it is only used in the body context
     // and undefined in the root context
     // however the whole context situation needs to be revisited
-    module_type: Type,
+    module_type: InternPool.Index,
 
     nodes: std.MultiArrayList(Node),
     extra: std.ArrayListUnmanaged(u32),
@@ -76,15 +76,12 @@ const Sema = struct {
     };
 
     pub const Context = struct {
-        mode: Mode,
-
-        pub const Mode = enum {
-            value,
-            type,
-        };
+        // when not null, the expression being evaluated should
+        // attempt to coerce into this type
+        type: ?InternPool.Index,
     };
 
-    pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, module_type: Type, scope: ScopeKind) !Sema {
+    pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, module_type: InternPool.Index, scope: ScopeKind) !Sema {
         return .{
             .gpa = gpa,
             .arena = arena,
@@ -196,7 +193,8 @@ const Sema = struct {
             .type = .int,
         };
 
-        const value = try self.expression(s, data.value, .{ .mode = .value });
+        // FIXME: implement type context
+        const value = try self.expression(s, data.value, .{ .type = null });
         const node = try self.addNode(.{
             .def = .{
                 .signal = try self.addExtra(signal),
@@ -211,8 +209,9 @@ const Sema = struct {
     fn yield(self: *Sema, s: *Scope, index: Cst.Index) !Index {
         const data = self.cst.payload(index).yield;
 
-        // FIXME: context needed here for result location semantics
-        const value = try self.expression(s, data, undefined);
+        const module_type = self.pool.get(self.module_type).ty.module;
+        const context: Context = .{ .type = module_type.output_type };
+        const value = try self.expression(s, data, context);
         _ = value;
         return .null;
     }
@@ -288,20 +287,19 @@ const Sema = struct {
         });
     }
 
-    fn expression(self: *Sema, s: *Scope, index: Cst.Index, _: Context) Error!Value {
+    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ctx: Context) Error!Value {
         const data = self.cst.payload(index);
-        // std.debug.print("{}\n", .{data});
 
         return switch (data) {
-            .ident => self.identExpression(s, index),
-            .unary => self.unary(s, index),
-            .binary => self.binary(s, index),
-            .bundle_literal => self.bundleLiteral(s, index),
+            .ident => self.identExpression(s, ctx, index),
+            .unary => self.unary(s, ctx, index),
+            .binary => self.binary(s, ctx, index),
+            .bundle_literal => self.bundleLiteral(s, ctx, index),
             else => unimplemented(),
         };
     }
 
-    fn identExpression(self: *Sema, s: *Scope, index: Cst.Index) !Value {
+    fn identExpression(self: *Sema, s: *Scope, _: Context, index: Cst.Index) !Value {
         const token = self.cst.mainToken(index);
         const ident = try self.internToken(token);
 
@@ -309,13 +307,12 @@ const Sema = struct {
         return s.map.get(ident).?;
     }
 
-    fn unary(self: *Sema, s: *Scope, index: Cst.Index) !Value {
+    fn unary(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).unary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        // FIXME: context?
-        const inner = try self.expression(s, data, undefined);
+        const inner = try self.expression(s, data, ctx);
         const node: Node = switch (operator) {
             .minus => .{ .ineg = inner },
             .tilde => .{ .bnot = inner },
@@ -327,14 +324,13 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn binary(self: *Sema, s: *Scope, index: Cst.Index) !Value {
+    fn binary(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).binary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        // FIXME: context?
-        const l = try self.expression(s, data.l, undefined);
-        const r = try self.expression(s, data.r, undefined);
+        const l = try self.expression(s, data.l, ctx);
+        const r = try self.expression(s, data.r, ctx);
         const bin: Node.Binary = .{ .l = l, .r = r };
         const node: Node = switch (operator) {
             .plus => .{ .iadd = bin },
@@ -352,16 +348,41 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn bundleLiteral(self: *Sema, s: *Scope, index: Cst.Index) !Value {
+    fn bundleLiteral(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).bundle_literal;
         const inits = self.cst.indices(data.inits);
 
+        const bundle_type = if (data.type != .null) type: {
+            // if explicitly specified, no need to infer from context
+            const ty = try self.type(data.type);
+            break :type ty;
+        } else type: {
+            // otherwise use the context
+            // FIXME: if this is null it is a compiler error
+            const inferred = ctx.type.?;
+            break :type inferred;
+        };
+
+        const ty = self.pool.get(bundle_type).ty.bundle;
+
+        // TODO: actually validate the struct
+        const values = try self.allocScratchSlice(Value, inits.len);
         for (inits) |idx| {
             const field_init = self.cst.payload(idx).field_init;
+            const main_token = self.cst.mainToken(idx);
+            const init_name = try self.internToken(main_token);
             const value = try self.expression(s, field_init, undefined);
-            _ = value;
+            const i = for (ty.field_names, 0..) |name, i| {
+                // const S = self.pool.get(name).str;
+                // const T = self.pool.get(init_name).str;
+                // std.debug.print("{}: {s} {}: {s}\n", .{ name, S, init_name, T });
+                if (name == init_name) break i;
+            } else unreachable;
+            values[i] = value;
         }
 
+        for (values) |value| std.debug.print("{}\n", .{value.payload.index});
+        // std.debug.print("{any}\n", .{values});
         return Value.index(.null);
     }
 
@@ -391,7 +412,7 @@ const Sema = struct {
             const param = try self.addNode(.{
                 .param = .{
                     .index = @intCast(i),
-                    .name = name,
+                    .type = ty,
                 },
             });
 
@@ -401,14 +422,14 @@ const Sema = struct {
         }
 
         const output_type = try self.type(ports.output);
-        const module_type: Type = .{
+        const signature: Type = .{
             .module = .{
                 .input_names = input_names,
                 .input_types = input_types,
                 .output_type = output_type,
             },
         };
-        _ = try self.pool.put(.{ .ty = module_type });
+        const module_type = try self.pool.put(.{ .ty = signature });
 
         var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, module_type, .body);
         errdefer sema.deinit();
@@ -418,12 +439,22 @@ const Sema = struct {
         return .int;
     }
 
+    fn getTempAir(self: *Sema) Air {
+        return .{
+            .nodes = self.nodes.slice(),
+            .extra = self.extra.items,
+            // NOTE: dereferencing this will explode
+            .body = .null,
+        };
+    }
+
     // NOTE: this is not meant to be used in release builds
     fn unimplemented() noreturn {
         std.debug.print("unimplemented!\n", .{});
         unreachable;
     }
 
+    // NOTE: this is not meant to be used in release builds
     fn unexpectedToken(self: *Sema, token: Cst.TokenIndex) noreturn {
         const tag = self.cst.tokenTag(token);
         const str = self.cst.tokenString(token);

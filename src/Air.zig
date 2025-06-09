@@ -178,10 +178,10 @@ pub const Node = union(enum) {
     param: struct {
         // index of the parameter in the current module scope
         index: u32,
-        // identifier name of the underlying parameter
-        // this is equivalent to the name field stored in the
+        // type of the underlying parameter (cached)
+        // this is equivalent to the type field stored in the
         // module type at the specified index
-        name: InternPool.Index,
+        type: InternPool.Index,
     },
 
     // yields a value from an expression block
@@ -228,4 +228,11 @@ pub fn extraSlice(self: *const Air, sl: ExtraSlice) []const u32 {
     const start = @intFromEnum(sl.start);
     const end = @intFromEnum(sl.end);
     return self.extra[start..end];
+}
+
+fn typeOf(self: *const Air, index: Index) InternPool.Index {
+    const tag = self.nodes.items(.tags)[@intFromEnum(index)];
+    switch (tag) {}
+
+    return .int;
 }

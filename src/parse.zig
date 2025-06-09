@@ -427,13 +427,13 @@ pub const Parser = struct {
     }
 
     fn fieldInit(p: *Parser) !Index {
-        const dot_token = try p.expect(.period);
-        _ = try p.expect(.ident);
+        _ = try p.expect(.period);
+        const ident_token = try p.expect(.ident);
         _ = try p.expect(.equal);
         const value_node = try p.expression(.value);
 
         return p.addNode(.{
-            .main_token = dot_token,
+            .main_token = ident_token,
             .payload = .{ .field_init = value_node },
         });
     }
