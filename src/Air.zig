@@ -76,6 +76,8 @@ pub const Node = union(enum) {
     integer,
     // a boolean literal, 'true' or 'false'
     bool,
+    // a named identifier (guaranteed to be within scope)
+    ident: InternPool.Index,
 
     // bundle literals initialize a value of a bundle type
     // which is either explicitly typed or inferred from context
@@ -203,6 +205,8 @@ pub const Node = union(enum) {
         type: InternPool.Index,
         name: InternPool.Index,
     };
+
+    pub const Tag = std.meta.Tag(Node);
 };
 
 nodes: std.MultiArrayList(Node).Slice,
@@ -214,25 +218,38 @@ pub fn deinit(self: *Air, gpa: Allocator) void {
     gpa.free(self.extra);
 }
 
-pub fn extraData(self: *const Air, index: usize, comptime T: type) T {
+pub fn extraData(self: *const Air, index: ExtraIndex, comptime T: type) T {
+    // TODO: replace this with the new memcpy based extra data implementation
+    const base = @intFromEnum(index);
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields, 0..) |field, i| {
-        comptime std.debug.assert(field.type == Index);
-        @field(result, field.name) = self.extra[index + i];
+        @field(result, field.name) = @enumFromInt(self.extra[base + i]);
     }
     return result;
 }
 
-pub fn extraSlice(self: *const Air, sl: ExtraSlice) []const u32 {
-    const start = @intFromEnum(sl.start);
-    const end = @intFromEnum(sl.end);
-    return self.extra[start..end];
+pub fn tag(self: *const Air, index: Index) Node.Tag {
+    const i = @intFromEnum(index);
+    return self.nodes.items(.tags)[i];
+}
+
+pub fn get(self: *const Air, index: Index) Node {
+    const i = @intFromEnum(index);
+    return self.nodes.get(i);
+}
+
+pub fn indices(self: *const Air, ids: Air.Indices) []const Index {
+    const slice = self.extraData(ids, Air.ExtraSlice);
+    const start: u32 = @intFromEnum(slice.start);
+    const end: u32 = @intFromEnum(slice.end);
+    return @ptrCast(self.extra[start..end]);
 }
 
 fn typeOf(self: *const Air, index: Index) InternPool.Index {
-    const tag = self.nodes.items(.tags)[@intFromEnum(index)];
-    switch (tag) {}
+    _ = self;
+    _ = index;
+    // switch (self.tag(index)) {}
 
     return .int;
 }

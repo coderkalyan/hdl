@@ -10,6 +10,7 @@ const Node = Air.Node;
 const Value = Air.Value;
 
 const Error = Allocator.Error || std.fmt.ParseIntError;
+pub var airs: std.ArrayListUnmanaged(Air) = .empty;
 
 pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -44,6 +45,7 @@ const Scope = struct {
     };
 };
 
+// TODO: pull this out into the file struct itself
 const Sema = struct {
     gpa: Allocator,
     arena: Allocator,
@@ -82,6 +84,10 @@ const Sema = struct {
     };
 
     pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, module_type: InternPool.Index, scope: ScopeKind) !Sema {
+        var nodes: std.MultiArrayList(Node) = .empty;
+        errdefer nodes.deinit(gpa);
+        try nodes.append(gpa, .{ .null = {} });
+
         return .{
             .gpa = gpa,
             .arena = arena,
@@ -89,7 +95,7 @@ const Sema = struct {
             .cst = cst,
             .scope = scope,
             .module_type = module_type,
-            .nodes = .empty,
+            .nodes = nodes,
             .extra = .empty,
             .scratch = .empty,
         };
@@ -135,6 +141,17 @@ const Sema = struct {
         return self.pool.put(.{ .str = str });
     }
 
+    pub fn addIndices(self: *Sema, ids: []const Index) !Air.Indices {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(self.gpa, @ptrCast(ids));
+        const end: u32 = @intCast(self.extra.items.len);
+
+        return self.addExtra(Cst.ExtraSlice{
+            .start = @enumFromInt(start),
+            .end = @enumFromInt(end),
+        });
+    }
+
     // no Airs are generated here, but the InternPool is populated with
     // types and identifiers, and a new analysis is called on each module body
     pub fn root(self: *Sema) !void {
@@ -162,15 +179,17 @@ const Sema = struct {
         const data = self.cst.payload(index).block;
         const slice = self.cst.indices(data);
 
-        const len = self.scratch.items.len;
-        defer self.scratch.shrinkRetainingCapacity(len);
+        const scratch_top = self.scratch.items.len;
+        defer self.scratch.shrinkRetainingCapacity(scratch_top);
         try self.scratch.ensureUnusedCapacity(self.arena, slice.len);
         for (slice) |i| {
             const ai = try self.statement(s, i);
             self.scratch.appendAssumeCapacity(@intFromEnum(ai));
         }
 
-        return .null;
+        const items: []const Index = @ptrCast(self.scratch.items[scratch_top..]);
+        const nodes = try self.addIndices(items);
+        return self.addNode(.{ .block = nodes });
     }
 
     fn statement(self: *Sema, s: *Scope, index: Cst.Index) !Index {
@@ -212,14 +231,15 @@ const Sema = struct {
         const module_type = self.pool.get(self.module_type).ty.module;
         const context: Context = .{ .type = module_type.output_type };
         const value = try self.expression(s, data, context);
-        _ = value;
-        return .null;
+        return self.addNode(.{ .yield = value });
     }
 
     fn typeStatement(self: *Sema, index: Cst.Index) !Index {
         const data = self.cst.payload(index).type;
         _ = try self.type(data);
 
+        // FIXME: this should not return anything, since type statements
+        // are completely internalized and do not generate any Air
         return .null;
     }
 
@@ -263,14 +283,14 @@ const Sema = struct {
 
     fn bundle(self: *Sema, index: Cst.Index) !InternPool.Index {
         const data = self.cst.payload(index).bundle;
-        const indices = self.cst.indices(data);
+        const items = self.cst.indices(data);
 
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
-        const names = try self.allocScratchSlice(InternPool.Index, indices.len);
-        const types = try self.allocScratchSlice(InternPool.Index, indices.len);
+        const names = try self.allocScratchSlice(InternPool.Index, items.len);
+        const types = try self.allocScratchSlice(InternPool.Index, items.len);
 
-        for (indices, names, types) |idx, *name, *ty| {
+        for (items, names, types) |idx, *name, *ty| {
             const field = self.cst.payload(idx).field;
             const token = self.cst.mainToken(idx);
             name.* = try self.internToken(token);
@@ -304,7 +324,9 @@ const Sema = struct {
         const ident = try self.internToken(token);
 
         // FIXME: implement traversal across the scope list
-        return s.map.get(ident).?;
+        std.debug.assert(s.map.contains(ident));
+        const node = try self.addNode(.{ .ident = ident });
+        return Value.index(node);
     }
 
     fn unary(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
@@ -381,8 +403,9 @@ const Sema = struct {
             values[i] = value;
         }
 
-        for (values) |value| std.debug.print("{}\n", .{value.payload.index});
+        // for (values) |value| std.debug.print("{}\n", .{value.payload.index});
         // std.debug.print("{any}\n", .{values});
+        // FIXME: return the actual node
         return Value.index(.null);
     }
 
@@ -433,10 +456,12 @@ const Sema = struct {
 
         var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, module_type, .body);
         errdefer sema.deinit();
-        var air = try sema.body(&scope, data.body);
-        defer air.deinit(self.gpa);
 
-        return .int;
+        const air = try sema.body(&scope, data.body);
+        try airs.append(self.gpa, air);
+        // defer air.deinit(self.gpa);
+
+        return module_type;
     }
 
     fn getTempAir(self: *Sema) Air {

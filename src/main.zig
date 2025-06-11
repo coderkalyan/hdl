@@ -4,6 +4,7 @@ const Cst = @import("Cst.zig");
 const parse = @import("parse.zig");
 const InternPool = @import("InternPool.zig");
 const Sema = @import("Sema.zig");
+const codegen = @import("codegen.zig");
 
 const io = std.io;
 const max_file_size = std.math.maxInt(u32);
@@ -53,4 +54,13 @@ pub fn main() !void {
     defer pool.deinit();
 
     try Sema.analyze(gpa, &pool, &tree);
+    defer {
+        for (Sema.airs.items) |*air| air.deinit(gpa);
+        Sema.airs.deinit(gpa);
+    }
+
+    const stdout = std.io.getStdOut().writer();
+    for (Sema.airs.items) |*air| {
+        try codegen.generate(gpa, stdout, &pool, air);
+    }
 }
