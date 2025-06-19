@@ -152,6 +152,17 @@ const Sema = struct {
         });
     }
 
+    pub fn addValues(self: *Sema, ids: []const Value) !Air.Values {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(self.gpa, @ptrCast(ids));
+        const end: u32 = @intCast(self.extra.items.len);
+
+        return self.addExtra(Cst.ExtraSlice{
+            .start = @enumFromInt(start),
+            .end = @enumFromInt(end),
+        });
+    }
+
     // no Airs are generated here, but the InternPool is populated with
     // types and identifiers, and a new analysis is called on each module body
     pub fn root(self: *Sema) !void {
@@ -205,15 +216,23 @@ const Sema = struct {
     fn def(self: *Sema, s: *Scope, index: Cst.Index) !Index {
         const data = self.cst.payload(index).def;
         const ident_token = self.cst.mainToken(index).advance(1);
-        const str = self.cst.tokenString(ident_token);
-        const signal: Node.Signal = .{
-            .name = try self.pool.put(.{ .str = str }),
-            // FIXME: implement this
-            .type = .int,
+        const name = try self.internToken(ident_token);
+
+        const ty, const value = if (data.type == .null) tv: {
+            // type inference, so first evaluate the value, and then
+            // determine its type and define the signal to that type
+            const value = try self.expression(s, data.value, .{ .type = null });
+            const ty = self.tempAir().typeOf(value);
+            break :tv .{ ty, value };
+        } else tv: {
+            // otherwise, first evaluate the type, and then use it in the
+            // result context for the value (i.e. to evaluate anonymous literals)
+            const ty = try self.type(data.type);
+            const value = try self.expression(s, data.value, .{ .type = ty });
+            break :tv .{ ty, value };
         };
 
-        // FIXME: implement type context
-        const value = try self.expression(s, data.value, .{ .type = null });
+        const signal: Node.Signal = .{ .name = name, .type = ty };
         const node = try self.addNode(.{
             .def = .{
                 .signal = try self.addExtra(signal),
@@ -325,7 +344,14 @@ const Sema = struct {
 
         // FIXME: implement traversal across the scope list
         std.debug.assert(s.map.contains(ident));
-        const node = try self.addNode(.{ .ident = ident });
+        // the map points to the def or decl node, which knows its type
+        const value = s.map.get(ident).?;
+        const node = try self.addNode(.{
+            .ident = .{
+                .type = self.tempAir().typeOf(value),
+                .name = ident,
+            },
+        });
         return Value.index(node);
     }
 
@@ -388,6 +414,8 @@ const Sema = struct {
         const ty = self.pool.get(bundle_type).ty.bundle;
 
         // TODO: actually validate the struct
+        const scratch_top = self.scratch.items.len;
+        defer self.scratch.shrinkRetainingCapacity(scratch_top);
         const values = try self.allocScratchSlice(Value, inits.len);
         for (inits) |idx| {
             const field_init = self.cst.payload(idx).field_init;
@@ -395,18 +423,18 @@ const Sema = struct {
             const init_name = try self.internToken(main_token);
             const value = try self.expression(s, field_init, undefined);
             const i = for (ty.field_names, 0..) |name, i| {
-                // const S = self.pool.get(name).str;
-                // const T = self.pool.get(init_name).str;
-                // std.debug.print("{}: {s} {}: {s}\n", .{ name, S, init_name, T });
                 if (name == init_name) break i;
             } else unreachable;
             values[i] = value;
         }
 
-        // for (values) |value| std.debug.print("{}\n", .{value.payload.index});
-        // std.debug.print("{any}\n", .{values});
-        // FIXME: return the actual node
-        return Value.index(.null);
+        const node = try self.addNode(.{
+            .bundle_literal = .{
+                .type = bundle_type,
+                .inits = try self.addValues(values),
+            },
+        });
+        return Value.index(node);
     }
 
     fn module(self: *Sema, index: Cst.Index) !InternPool.Index {
@@ -419,29 +447,14 @@ const Sema = struct {
         const input_names = try self.allocScratchSlice(InternPool.Index, inputs.len);
         const input_types = try self.allocScratchSlice(InternPool.Index, inputs.len);
 
-        var scope: Scope = .{
-            .kind = .body,
-            .map = .empty,
-            .parent = null,
-        };
-        const map = &scope.map;
-        try map.ensureUnusedCapacity(self.arena, @intCast(inputs.len));
-
         for (inputs, 0..) |idx, i| {
             const input = self.cst.payload(idx).input;
             const token = self.cst.mainToken(idx);
             const name = try self.internToken(token);
             const ty = try self.type(input);
-            const param = try self.addNode(.{
-                .param = .{
-                    .index = @intCast(i),
-                    .type = ty,
-                },
-            });
 
             input_names[i] = name;
             input_types[i] = ty;
-            map.putAssumeCapacity(name, Value.index(param));
         }
 
         const output_type = try self.type(ports.output);
@@ -457,6 +470,26 @@ const Sema = struct {
         var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, module_type, .body);
         errdefer sema.deinit();
 
+        // the parameter nodes should actually exist in the inner scope
+        var scope: Scope = .{
+            .kind = .body,
+            .map = .empty,
+            .parent = null,
+        };
+        const map = &scope.map;
+        try map.ensureUnusedCapacity(self.arena, @intCast(inputs.len));
+        for (input_names, input_types, 0..) |name, ty, i| {
+            const param = try sema.addNode(.{
+                .param = .{
+                    .index = @intCast(i),
+                    .type = ty,
+                },
+            });
+
+            const value = Value.index(param);
+            map.putAssumeCapacity(name, value);
+        }
+
         const air = try sema.body(&scope, data.body);
         try airs.append(self.gpa, air);
         // defer air.deinit(self.gpa);
@@ -464,7 +497,7 @@ const Sema = struct {
         return module_type;
     }
 
-    fn getTempAir(self: *Sema) Air {
+    fn tempAir(self: *Sema) Air {
         return .{
             .nodes = self.nodes.slice(),
             .extra = self.extra.items,
