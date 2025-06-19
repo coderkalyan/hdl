@@ -39,12 +39,143 @@ fn CodeGen(WriterType: type) type {
         const Self = @This();
         const Error = WriterType.Error || Allocator.Error;
 
+        const ExprIterator = struct {
+            arena: Allocator,
+            air: *const Air,
+            stack: std.ArrayListUnmanaged(Frame),
+
+            pub const Frame = struct {
+                value: Value,
+                ptr: u32,
+            };
+
+            pub fn init(arena: Allocator, air: *const Air, root: Value) !ExprIterator {
+                var stack: std.ArrayListUnmanaged(Frame) = .empty;
+                try stack.append(arena, .{
+                    .value = root,
+                    .ptr = 0,
+                });
+
+                return .{
+                    .arena = arena,
+                    .air = air,
+                    .stack = stack,
+                };
+            }
+
+            pub fn next(self: *ExprIterator) !?Value {
+                const stack = self.stack.items;
+                if (stack.len == 0) return null;
+
+                const frame = &stack[stack.len - 1];
+                std.debug.assert(frame.value.tag == .index); // FIXME
+                const index = frame.value.payload.index;
+                const items = switch (self.air.get(index)) {
+                    .bundle_literal => |bundle| self.air.values(bundle.inits),
+                    else => &.{frame.value},
+                };
+
+                if (frame.ptr < items.len) {
+                    const item = items[frame.ptr];
+                    frame.ptr += 1;
+                    return item;
+                } else {
+                    _ = self.stack.pop();
+                    return self.next();
+                }
+            }
+        };
+
+        const TargetIterator = struct {
+            cg: *Super,
+            // base: []const u8,
+            stack: std.ArrayListUnmanaged(Frame),
+
+            // NOTE: The naming is very confusing but Self is not
+            // defined here and the parent defines it to itself.
+            const Super = Self;
+
+            const Frame = struct {
+                type: InternPool.Index,
+                name: InternPool.Index,
+                ptr: u32,
+            };
+
+            const Target = struct {
+                name: []const u8,
+                type: InternPool.Index,
+            };
+
+            pub fn init(cg: *Super, base: InternPool.Index, root: InternPool.Index) !TargetIterator {
+                var stack: std.ArrayListUnmanaged(Frame) = .empty;
+                try stack.append(cg.arena, .{
+                    .type = root,
+                    .name = base,
+                    .ptr = 0,
+                });
+
+                return .{
+                    .cg = cg,
+                    // .base = base,
+                    .stack = stack,
+                };
+            }
+
+            pub fn next(self: *TargetIterator) !?Target {
+                const stack = self.stack.items;
+                if (stack.len == 0) return null;
+
+                const bytes = &self.cg.bytes;
+                const bytes_top = bytes.items.len;
+
+                for (stack, 0..) |*frame, i| {
+                    const name = self.cg.pool.get(frame.name).str;
+                    try bytes.ensureUnusedCapacity(self.cg.arena, name.len + 1);
+                    bytes.appendSliceAssumeCapacity(name);
+                    if (i < stack.len - 1) bytes.appendAssumeCapacity('_');
+                }
+
+                const frame = &stack[stack.len - 1];
+                const ty = self.cg.pool.get(frame.type).ty;
+                switch (ty) {
+                    .bundle => |bundle| {
+                        std.debug.assert(bundle.field_names.len == bundle.field_types.len);
+                        if (frame.ptr < bundle.field_names.len) {
+                            const name = bundle.field_names[frame.ptr];
+                            const frame_ty = bundle.field_types[frame.ptr];
+                            frame.ptr += 1;
+
+                            const str = self.cg.pool.get(name).str;
+                            try bytes.ensureUnusedCapacity(self.cg.arena, str.len + 1);
+                            bytes.appendAssumeCapacity('_');
+                            bytes.appendSliceAssumeCapacity(str);
+
+                            return .{
+                                .name = bytes.items[bytes_top..],
+                                .type = frame_ty,
+                            };
+                        } else {
+                            _ = self.stack.pop();
+                            return self.next();
+                        }
+                    },
+                    .module => unreachable,
+                    else => {
+                        _ = self.stack.pop();
+                        return .{
+                            .name = bytes.items[bytes_top..],
+                            .type = frame.type,
+                        };
+                    },
+                }
+            }
+        };
+
         pub fn block(self: *Self, index: Index) !void {
             const data = self.air.get(index).block;
             const slice = self.air.indices(data);
             for (slice) |idx| {
                 try self.statement(idx);
-                try self.writer.print("\n", .{});
             }
         }
 
@@ -62,53 +193,63 @@ fn CodeGen(WriterType: type) type {
         fn def(self: *Self, index: Index) !void {
             const data = self.air.get(index).def;
             const signal = self.air.extraData(data.signal, Node.Signal);
-            const str = self.pool.get(signal.name).str;
+            std.debug.assert(signal.type == self.air.typeOf(data.value));
 
-            try self.writer.print("wire {s} = ", .{str});
+            var targets = try self.iterateTarget(signal.name, signal.type);
+            var exprs = try self.iterateExpression(data.value);
+            while (true) {
+                const target = try targets.next();
+                const value = try exprs.next();
+                if (target == null) {
+                    std.debug.assert(value == null);
+                    break;
+                }
 
-            // when evaluating the expression and target, the rendered
-            // strings are written to bytes, and their extents are recorded
-            // in the scratch buffer. expressions that process aggregates
-            // add multiple entries to the scratch buffer, rest are blind
-            const scratch_top = self.scratch.items.len;
-            defer self.scratch.shrinkRetainingCapacity(scratch_top);
-            defer self.bytes.clearRetainingCapacity();
-
-            const values = values: {
-                const top = self.scratch.items.len;
-                try self.scratch.append(self.arena, @intCast(self.bytes.items.len));
-                try self.expression(data.value);
-                try self.scratch.append(self.arena, @intCast(self.bytes.items.len));
-                break :values self.scratch.items[top..];
-            };
-
-            for (0..values.len - 1) |i| {
-                const start = values[i];
-                const end = values[i + 1];
-                try self.writer.print("{s}", .{self.bytes.items[start..end]});
+                const name = target.?.name;
+                const expr = try self.formatExpression(value.?);
+                try self.writer.print("wire {s} = {s};\n", .{ name, expr });
             }
-            try self.writer.print(";", .{});
         }
 
         fn yield(self: *Self, index: Index) !void {
             const data = self.air.get(index).yield;
+            const ty = self.air.typeOf(data);
+            var targets = try self.iterateTarget(.builtin_out, ty);
+            var exprs = try self.iterateExpression(data);
+            while (true) {
+                const target = try targets.next();
+                const value = try exprs.next();
+                if (target == null) {
+                    std.debug.assert(value == null);
+                    break;
+                }
 
-            // FIXME: this is such a hack
-            try self.writer.print("assign out = ", .{});
-            try self.expression(data);
-            try self.writer.print(";", .{});
+                const name = target.?.name;
+                const expr = try self.formatExpression(value.?);
+                try self.writer.print("assign {s} = {s};\n", .{ name, expr });
+            }
         }
 
         fn @"type"(self: *Self, ip: InternPool.Index) Error!void {
             const ty = self.pool.get(ip).ty;
             switch (ty) {
-                .bits, .uint => |width| try self.bytes.appendSlice(self.arena, width),
-                .uint => try self.bytes.appendSlice(self.arena, "uint"),
-                .bits => try self.bytes.appendSlice(self.arena, "bits"),
-                .bool => try self.bytes.appendSlice(self.arena, "bool"),
-                .bundle => try self.bytes.appendSlice(self.arena, "bundle"),
+                .bits, .uint, .sint => |width| try self.bytes.appendSlice(self.arena, width),
                 else => unreachable,
             }
+        }
+
+        fn iterateExpression(self: *Self, root: Value) !ExprIterator {
+            return .init(self.arena, self.air, root);
+        }
+
+        fn iterateTarget(self: *Self, base: InternPool.Index, root: InternPool.Index) !TargetIterator {
+            return .init(self, base, root);
+        }
+
+        fn formatExpression(self: *Self, value: Value) Error![]const u8 {
+            const start = self.bytes.items.len;
+            try self.expression(value);
+            return self.bytes.items[start..];
         }
 
         fn expression(self: *Self, value: Value) Error!void {
@@ -120,7 +261,9 @@ fn CodeGen(WriterType: type) type {
             switch (self.air.get(index)) {
                 .null => unreachable,
                 .ident => try self.ident(index),
-                .bundle_literal => try self.bundleLiteral(index),
+                // do not call expression() directly on aggregate
+                // types, use iterate() first to flatten the tree
+                .bundle_literal => unreachable,
                 .ineg => try self.ineg(index),
                 .bnot => try self.bnot(index),
                 .lnot => try self.lnot(index),

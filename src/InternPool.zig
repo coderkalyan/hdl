@@ -163,6 +163,7 @@ pub const Index = enum(u31) {
     // true,
     // false,
 
+    builtin_out,
     // builtin_int,
     // builtin_float,
     // builtin_bool,
@@ -212,6 +213,7 @@ const static_keys = [_]Key{
     .{ .ty = Type.common.bool },
     .{ .tv = TypedValue.common.izero },
     .{ .tv = TypedValue.common.ione },
+    .{ .str = "out" },
     // .{ .tv = TypedValue.common.true },
     // .{ .tv = TypedValue.common.false },
 };
