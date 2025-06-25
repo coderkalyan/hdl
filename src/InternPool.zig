@@ -4,38 +4,48 @@ const Type = @import("type.zig").Type;
 const TypedValue = @import("value.zig").TypedValue;
 const Air = @import("Air.zig");
 const Cst = @import("Cst.zig");
+const Package = @import("Package.zig");
 
 const InternPool = @This();
 const Allocator = std.mem.Allocator;
+const Decl = Package.Decl;
 
 gpa: Allocator,
-// used to map keys to indices in `items` using standard
-// hashing and probing
+/// Used to map keys to indices in `items` using standard
+/// hashing and probing.
 map: std.AutoArrayHashMapUnmanaged(void, void),
-// the fundamental backing stores of the pool - stores a
-// enum tag (representing the kind of object) and a single u32
+/// The primary backing store of the pool - stores a
+/// enum tag (representing the kind of object) and a single u32.
 items: std.MultiArrayList(Item),
-// extra u32 store for objects
+/// Extra u32 store for objects.
 extra: std.ArrayListUnmanaged(u32),
-// extra i64 store for objects, primarily used for 64 bit constants
+/// Extra i64 store for objects, primarily used for 64 bit constants.
 wide: std.ArrayListUnmanaged(i64),
-// a list of all generated function (and toplevel) Airs
+/// A list of all generated module Airs.
 airs: std.SegmentedList(Air, 1),
-// backing store for string interning
+/// A list of all package Decls.
+decls: std.SegmentedList(Decl, 1),
+// TODO: probably move this to somewhere else
+// Index  into the decls list by name.
+decls_map: std.AutoHashMapUnmanaged(InternPool.Index, DeclIndex),
+/// Backing store for string interning.
 bytes: std.ArrayListUnmanaged(u8),
-// probing table for interning strings in the `bytes` backing store
+/// Probing table for interning strings in the `bytes` backing store.
 string_table: std.HashMapUnmanaged(StringIndex, void, IndexContext, std.hash_map.default_max_load_percentage),
 
 pub const ExtraIndex = enum(u32) { _ };
 pub const WideIndex = enum(u32) { _ };
 pub const StringIndex = enum(u32) { _ };
-pub const AirIndex = enum(u32) { toplevel, _ };
+pub const AirIndex = enum(u32) { _ };
+pub const DeclIndex = enum(u32) { _ };
 
 pub const Key = union(enum) {
+    placeholder,
     ty: Type,
     tv: TypedValue,
     str: []const u8,
-    air: AirIndex,
+    // air: AirIndex,
+    // decl: DeclIndex,
 
     const Tag = std.meta.Tag(Key);
 
@@ -60,14 +70,17 @@ pub const Key = union(enum) {
 
     fn hash64(key: Key) u64 {
         const Hash = std.hash.Wyhash;
-        const asBytes = std.mem.asBytes;
+        // const asBytes = std.mem.asBytes;
         const seed = @intFromEnum(key);
 
         return switch (key) {
+            .placeholder => seed,
             .ty => |ty| ty.hash64(),
             .tv => |tv| tv.hash64(),
             .str => |str| Hash.hash(seed, str),
-            .air => |index| Hash.hash(seed, asBytes(&index)),
+            // inline .air,
+            // .decl,
+            // => |index| Hash.hash(seed, asBytes(&index)),
         };
     }
 
@@ -79,8 +92,9 @@ pub const Key = union(enum) {
         if (a_tag != b_tag) return false;
 
         switch (a_tag) {
+            .placeholder => return true,
             .ty => return a.ty.eql(b.ty),
-            inline .tv, .air => |tag| {
+            inline .tv => |tag| {
                 const a_data = @field(a, @tagName(tag));
                 const b_data = @field(b, @tagName(tag));
                 return std.meta.eql(a_data, b_data);
@@ -95,36 +109,40 @@ pub const Item = struct {
     payload: Payload,
 
     pub const Tag = enum(u8) {
+        placeholder,
         bits_ty,
         uint_ty,
         sint_ty,
         bool_ty,
-        bundle_ty,
-        module_ty,
         int_ty,
+        bundle_ty,
+        signature_ty,
+        module_ty,
         int_tv,
-        // bool_tv,
         str,
-        air,
+        // air,
+        // decl,
     };
 
     pub const Payload = union {
-        // used when tag enum is enough to encode the entire item
+        /// Used when tag enum is enough to encode the entire item.
         placeholder: void,
-        // used to encode bit widths of vector types
+        /// Used to encode bit widths of vector types.
         width: u32,
-        // bools are the only constant small enough to encode inline
+        /// Bools are the only constant small enough to encode inline.
         bool: bool,
-        // index into item array (reference to another item)
+        /// Index into item array (reference to another item).
         ip: Index,
-        // index into extra data array (32 bit store)
+        /// Index into extra data array (32 bit store).
         extra: ExtraIndex,
-        // index into wide data array (64 bit store)
+        /// Index into wide data array (64 bit store).
         wide: WideIndex,
-        // index into string table
+        /// Index into string table.
         str: StringIndex,
-        // index into airs list
-        air: AirIndex,
+        // Index into airs list.
+        // air: AirIndex,
+        // Index into the decls list.
+        // decl: DeclIndex,
 
         comptime {
             if (builtin.mode == .ReleaseFast) {
@@ -133,15 +151,27 @@ pub const Item = struct {
         }
     };
 
+    /// Unpacks to `Type.Bundle`.
     pub const Bundle = struct {
+        cst_index: Cst.Index,
+        name: InternPool.Index,
         field_names: Index.Slice,
         field_types: Index.Slice,
     };
 
-    pub const Module = struct {
+    /// Unpacks to `Type.Signature`.
+    pub const Signature = struct {
         input_names: Index.Slice,
         input_types: Index.Slice,
         output_type: Index,
+    };
+
+    /// Unpacks to `Type.Module`.
+    pub const Module = struct {
+        cst_index: Cst.Index,
+        name: Index,
+        signature: Index,
+        air: AirIndex,
     };
 
     pub const ExtraSlice = struct {
@@ -150,26 +180,20 @@ pub const Item = struct {
     };
 };
 
-// Indices are 31 bits so the upper bit can be used to discriminate
-// between runtime (air indices) and compile time (intern pool indices)
+/// Indices are 31 bits so the upper bit can be used to discriminate
+/// between runtime (air indices) and compile time (intern pool indices).
+/// Common items are created at init time and given reserved indices.
 pub const Index = enum(u31) {
-    // common items are created at init time and given
-    // reserved indices
+    /// Placeholder for representing null index.
+    null,
+    // Common types.
     int,
     bool,
-
+    /// Common values.
     izero,
     ione,
-    // true,
-    // false,
-
+    /// Common strings.
     builtin_out,
-    // builtin_int,
-    // builtin_float,
-    // builtin_bool,
-    // builtin_print,
-    // builtin_len,
-    // builtin_append,
 
     _,
 
@@ -209,25 +233,26 @@ const SliceAdapter = struct {
 };
 
 const static_keys = [_]Key{
+    .{ .placeholder = {} },
     .{ .ty = Type.common.int },
     .{ .ty = Type.common.bool },
     .{ .tv = TypedValue.common.izero },
     .{ .tv = TypedValue.common.ione },
     .{ .str = "out" },
-    // .{ .tv = TypedValue.common.true },
-    // .{ .tv = TypedValue.common.false },
 };
 
 pub fn init(gpa: Allocator) !InternPool {
     var pool: InternPool = .{
         .gpa = gpa,
-        .map = .{},
-        .items = .{},
-        .extra = .{},
-        .wide = .{},
+        .map = .empty,
+        .items = .empty,
+        .extra = .empty,
+        .wide = .empty,
         .airs = .{},
-        .bytes = .{},
-        .string_table = .{},
+        .decls = .{},
+        .decls_map = .empty,
+        .bytes = .empty,
+        .string_table = .empty,
     };
 
     for (static_keys) |key| _ = try pool.put(key);
@@ -236,13 +261,18 @@ pub fn init(gpa: Allocator) !InternPool {
 
 pub fn deinit(pool: *InternPool) void {
     const gpa = pool.gpa;
-
     pool.map.deinit(gpa);
     pool.items.deinit(gpa);
     pool.extra.deinit(gpa);
     pool.wide.deinit(gpa);
+    pool.decls.deinit(gpa);
+    pool.decls_map.deinit(gpa);
     pool.bytes.deinit(gpa);
     pool.string_table.deinit(gpa);
+
+    var it = pool.airs.iterator(0);
+    while (it.next()) |air| air.deinit(gpa);
+    pool.airs.deinit(gpa);
 }
 
 pub fn addExtra(pool: *InternPool, extra: anytype) !ExtraIndex {
@@ -290,10 +320,21 @@ pub fn put(pool: *InternPool, key: Key) !Index {
     if (gop.found_existing) return @enumFromInt(gop.index);
 
     try pool.items.append(pool.gpa, switch (key) {
+        .placeholder => .{
+            .tag = .placeholder,
+            .payload = .{ .placeholder = {} },
+        },
         .ty => |ty| try ty.serialize(pool),
         .tv => |tv| try tv.serialize(pool),
         .str => |str| try pool.putString(str),
-        .air => |air| .{ .tag = .air, .payload = .{ .air = air } },
+        // .air => |air| .{
+        //     .tag = .air,
+        //     .payload = .{ .air = air },
+        // },
+        // .decl => |decl| .{
+        //     .tag = .decl,
+        //     .payload = .{ .decl = decl },
+        // },
     });
     return @enumFromInt(pool.items.len - 1);
 }
@@ -304,19 +345,21 @@ pub fn get(pool: *const InternPool, _index: Index) Key {
 
     const item = pool.items.get(index);
     return switch (item.tag) {
+        .placeholder => .{ .placeholder = {} },
         .bits_ty,
         .uint_ty,
         .sint_ty,
         .bool_ty,
         .int_ty,
         .bundle_ty,
+        .signature_ty,
         .module_ty,
         => .{ .ty = Type.deserialize(item, pool) },
         .int_tv,
-        // .bool_tv,
         => .{ .tv = TypedValue.deserialize(item, pool) },
         .str => .{ .str = pool.getString(item) },
-        .air => .{ .air = item.payload.air },
+        // .air => .{ .air = item.payload.air },
+        // .decl => .{ .decl = item.payload.decl },
     };
 }
 
@@ -339,13 +382,27 @@ fn getString(pool: *const InternPool, item: Item) []const u8 {
 }
 
 pub fn createAir(pool: *InternPool, air: Air) !AirIndex {
-    const index: u32 = @intCast(pool.irs.count());
+    const index: u32 = @intCast(pool.airs.count());
     try pool.airs.append(pool.gpa, air);
     return @enumFromInt(index);
 }
 
 pub fn airPtr(pool: *InternPool, index: AirIndex) *Air {
     return pool.airs.at(@intFromEnum(index));
+}
+
+pub fn airPtrConst(pool: *const InternPool, index: AirIndex) *const Air {
+    return pool.airs.at(@intFromEnum(index));
+}
+
+pub fn createDecl(pool: *InternPool, decl: Decl) !DeclIndex {
+    const index: u32 = @intCast(pool.decls.count());
+    try pool.decls.append(pool.gpa, decl);
+    return @enumFromInt(index);
+}
+
+pub fn declPtr(pool: *InternPool, index: DeclIndex) *Decl {
+    return pool.decls.at(@intFromEnum(index));
 }
 
 pub fn print(pool: *const InternPool, writer: anytype, ip: Index) !void {

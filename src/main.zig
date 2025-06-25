@@ -41,6 +41,7 @@ pub fn main() !void {
 
     _ = args.next(); // skip executable
     const filename = args.next().?;
+    const root = args.next().?;
 
     // read in the entire source file, hard to stream in because the lexer
     // needs a lookahead
@@ -54,13 +55,25 @@ pub fn main() !void {
     defer pool.deinit();
 
     try Sema.analyze(gpa, &pool, &tree);
-    defer {
-        for (Sema.airs.items) |*air| air.deinit(gpa);
-        Sema.airs.deinit(gpa);
-    }
 
     const stdout = std.io.getStdOut().writer();
-    for (Sema.airs.items) |*air| {
-        try codegen.generate(gpa, stdout, &pool, air);
-    }
+
+    const root_ip = try pool.put(.{ .str = root });
+    const decl_index = pool.decls_map.get(root_ip).?;
+    const decl = pool.declPtr(decl_index);
+    const module = pool.get(decl.type).ty.module;
+    // const air = pool.airPtr(module.air);
+    try codegen.generate(gpa, stdout, &pool, module);
+
+    // var decls = pool.decls_map.iterator();
+    // while (decls.next()) |entry| {
+    //     const name = pool.get(entry.key_ptr.*).str;
+    //     const decl = entry.value_ptr.*;
+    //     std.debug.print("{s} {}\n", .{ name, decl });
+    // }
+    //
+    // var airs = pool.airs.iterator(0);
+    // while (airs.next()) |air| {
+    //     try codegen.generate(gpa, stdout, &pool, air);
+    // }
 }

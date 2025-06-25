@@ -1,5 +1,6 @@
 const std = @import("std");
 const InternPool = @import("InternPool.zig");
+const Cst = @import("Cst.zig");
 
 const Allocator = std.mem.Allocator;
 const Item = InternPool.Item;
@@ -18,18 +19,57 @@ pub const Type = union(enum) {
     // compile time integer, no width and not synthesizable
     int: void,
     // hardware bundle of nets
-    bundle: struct {
-        field_names: []const Index,
-        field_types: []const Index,
-    },
-    // hardware module
-    module: struct {
-        input_names: []const Index,
-        input_types: []const Index,
-        output_type: Index,
-    },
+    bundle: Bundle,
+    // Module signature with input ports and one output port.
+    // Signatures are compared structurally, so two signatures with
+    // different names but the same input and output types are equal.
+    signature: Signature,
+    // Hardware module with a signature, body, and name.
+    // Modules are distinct, so two modules with the same signature are
+    // not equivalent/interchangeable. However, the underlying signature
+    // can be compared structurally to check compatibility with a type
+    // constraint.
+    module: Module,
 
     pub const Tag = std.meta.Tag(Type);
+
+    pub const Bundle = struct {
+        /// The index of the `bundle` Cst node. Because types can
+        /// be anonymous, this is distinct from the `type` decl node.
+        cst_index: Cst.Index,
+        /// For anonymous types, this is `null`.
+        name: InternPool.Index,
+        /// Information about the fields in this bundle. The fields are
+        /// stored in canonical order and are guaranteed to be the same
+        /// length.
+        field_names: []const Index,
+        field_types: []const Index,
+    };
+
+    pub const Signature = struct {
+        /// Information about the input ports for the signature. The fields
+        /// are stored in canonical order and are guaranteed to be the same
+        /// length.
+        /// Input names are only used by modules that refer to a signature,
+        /// and not used for equivalence checking of the signature itself.
+        input_names: []const Index,
+        input_types: []const Index,
+        /// The type of the single output port, which is unnamed.
+        output_type: Index,
+    };
+
+    pub const Module = struct {
+        /// The index of the `module` Cst node. Because modules are types
+        /// and can be anonymous, this is distinct from the `type` decl node.
+        cst_index: Cst.Index,
+        /// For anonymous modules, this is `null`.
+        name: InternPool.Index,
+        /// Signature of the module, which can be compared structurally to
+        /// check compatibility with a type constraint.
+        signature: InternPool.Index,
+        /// The Air for the module body.
+        air: InternPool.AirIndex,
+    };
 
     // converts a Type into an InternPool.Item for efficient
     // storage. Extra serialization storage is available via
@@ -43,6 +83,8 @@ pub const Type = union(enum) {
             .int => .{ .tag = .int_ty, .payload = .{ .placeholder = {} } },
             .bundle => |bundle| bundle: {
                 const extra = try pool.addExtra(Item.Bundle{
+                    .cst_index = bundle.cst_index,
+                    .name = bundle.name,
                     .field_names = try pool.addSlice(@ptrCast(bundle.field_names)),
                     .field_types = try pool.addSlice(@ptrCast(bundle.field_types)),
                 });
@@ -52,11 +94,23 @@ pub const Type = union(enum) {
                     .payload = .{ .extra = extra },
                 };
             },
+            .signature => |signature| signature: {
+                const extra = try pool.addExtra(Item.Signature{
+                    .input_names = try pool.addSlice(@ptrCast(signature.input_names)),
+                    .input_types = try pool.addSlice(@ptrCast(signature.input_types)),
+                    .output_type = signature.output_type,
+                });
+                break :signature .{
+                    .tag = .signature_ty,
+                    .payload = .{ .extra = extra },
+                };
+            },
             .module => |module| module: {
                 const extra = try pool.addExtra(Item.Module{
-                    .input_names = try pool.addSlice(@ptrCast(module.input_names)),
-                    .input_types = try pool.addSlice(@ptrCast(module.input_types)),
-                    .output_type = module.output_type,
+                    .cst_index = module.cst_index,
+                    .name = module.name,
+                    .signature = module.signature,
+                    .air = module.air,
                 });
 
                 break :module .{
@@ -83,21 +137,35 @@ pub const Type = union(enum) {
 
                 break :type .{
                     .bundle = .{
+                        .cst_index = bundle.cst_index,
+                        .name = bundle.name,
                         .field_names = field_names,
                         .field_types = field_types,
                     },
                 };
             },
+            .signature_ty => type: {
+                const signature = pool.extraData(item.payload.extra, Item.Signature);
+                const input_names: []const Index = pool.extraSlice(signature.input_names);
+                const input_types: []const Index = pool.extraSlice(signature.input_types);
+
+                break :type .{
+                    .signature = .{
+                        .input_names = input_names,
+                        .input_types = input_types,
+                        .output_type = signature.output_type,
+                    },
+                };
+            },
             .module_ty => type: {
                 const module = pool.extraData(item.payload.extra, Item.Module);
-                const input_names: []const Index = pool.extraSlice(module.input_names);
-                const input_types: []const Index = pool.extraSlice(module.input_types);
 
                 break :type .{
                     .module = .{
-                        .input_names = input_names,
-                        .input_types = input_types,
-                        .output_type = module.output_type,
+                        .cst_index = module.cst_index,
+                        .name = module.name,
+                        .signature = module.signature,
+                        .air = module.air,
                     },
                 };
             },
@@ -109,17 +177,29 @@ pub const Type = union(enum) {
         const Hash = std.hash.Wyhash;
         const seed = @intFromEnum(ty);
         var hasher: Hash = .init(seed);
+        // TODO: this can be automated with a correct "deep" recursive
+        // hasher (either find one in the standard library or model it
+        // after std.mem.eql and std.meta.eql)
         switch (ty) {
             .bits, .uint, .sint => |width| hasher.update(asBytes(&width)),
             .bool, .int => {},
             .bundle => |bundle| {
+                hasher.update(asBytes(&bundle.cst_index));
+                hasher.update(asBytes(&bundle.name));
                 for (bundle.field_names) |*field| hasher.update(asBytes(field));
                 for (bundle.field_types) |*field| hasher.update(asBytes(field));
             },
+            .signature => |signature| {
+                for (signature.input_names) |*field| hasher.update(asBytes(field));
+                for (signature.input_types) |*field| hasher.update(asBytes(field));
+                hasher.update(asBytes(&signature.output_type));
+            },
             .module => |module| {
-                for (module.input_names) |*field| hasher.update(asBytes(field));
-                for (module.input_types) |*field| hasher.update(asBytes(field));
-                hasher.update(asBytes(&module.output_type));
+                // TODO: this can be automated with std.auto_hash.hash
+                // but need to be careful about the seed
+                hasher.update(asBytes(&module.cst_index));
+                hasher.update(asBytes(&module.name));
+                hasher.update(asBytes(&module.signature));
             },
         }
 

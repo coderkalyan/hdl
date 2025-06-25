@@ -1,6 +1,7 @@
 const std = @import("std");
 const Air = @import("Air.zig");
 const InternPool = @import("InternPool.zig");
+const Type = @import("type.zig").Type;
 
 const Allocator = std.mem.Allocator;
 const GenericWriter = std.io.GenericWriter;
@@ -9,21 +10,25 @@ const Node = Air.Node;
 const Index = Air.Index;
 const Value = Air.Value;
 
-pub fn generate(gpa: Allocator, writer: anytype, pool: *const InternPool, air: *const Air) !void {
+pub fn generate(gpa: Allocator, writer: anytype, pool: *const InternPool, module: Type.Module) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
+    const air = pool.airPtrConst(module.air);
     var codegen: CodeGen(@TypeOf(writer)) = .{
         .gpa = gpa,
         .arena = arena.allocator(),
         .writer = writer,
         .pool = pool,
+        .module = module,
         .air = air,
         .scratch = .empty,
         .bytes = .empty,
     };
 
+    try codegen.preamble();
     try codegen.block(air.body);
+    try codegen.postamble();
 }
 
 fn CodeGen(WriterType: type) type {
@@ -31,6 +36,7 @@ fn CodeGen(WriterType: type) type {
         gpa: Allocator,
         arena: Allocator,
         writer: WriterType,
+        module: Type.Module,
         air: *const Air,
         pool: *const InternPool,
         scratch: std.ArrayListUnmanaged(u32),
@@ -205,9 +211,10 @@ fn CodeGen(WriterType: type) type {
                     break;
                 }
 
+                const datatype = try self.type(target.?.type);
                 const name = target.?.name;
                 const expr = try self.formatExpression(value.?);
-                try self.writer.print("wire {s} = {s};\n", .{ name, expr });
+                try self.writer.print("wire {s} {s} = {s};\n", .{ datatype, name, expr });
             }
         }
 
@@ -230,10 +237,16 @@ fn CodeGen(WriterType: type) type {
             }
         }
 
-        fn @"type"(self: *Self, ip: InternPool.Index) Error!void {
+        fn @"type"(self: *Self, ip: InternPool.Index) Error![]const u8 {
             const ty = self.pool.get(ip).ty;
             switch (ty) {
-                .bits, .uint, .sint => |width| try self.bytes.appendSlice(self.arena, width),
+                .bits, .uint, .sint => |width| {
+                    if (width == 1) return "";
+                    const bytes_top = self.bytes.items.len;
+                    const writer = self.bytes.writer(self.arena);
+                    try writer.print("[{}:0]", .{width - 1});
+                    return self.bytes.items[bytes_top..];
+                },
                 else => unreachable,
             }
         }
@@ -397,6 +410,36 @@ fn CodeGen(WriterType: type) type {
 
             try self.writer.print(" {s} ", .{op});
             try self.expression(data.r);
+        }
+
+        fn preamble(self: *Self) !void {
+            const module_name = self.pool.get(self.module.name).str;
+            const signature = self.pool.get(self.module.signature).ty.signature;
+
+            try self.writer.print("module {s} (\n", .{module_name});
+            for (signature.input_names, signature.input_types) |name, ty| {
+                var targets = try self.iterateTarget(name, ty);
+                while (try targets.next()) |target| {
+                    const ts = try self.type(target.type);
+                    try self.writer.print("input wire {s} {s}", .{ ts, target.name });
+                    try self.writer.print(", ", .{});
+                    try self.writer.print("\n", .{});
+                }
+            }
+            var targets = try self.iterateTarget(.builtin_out, signature.output_type);
+            var first = true;
+            while (try targets.next()) |target| {
+                if (!first) try self.writer.print(",\n", .{});
+                first = false;
+                const ts = try self.type(target.type);
+                try self.writer.print("output wire {s} {s}", .{ ts, target.name });
+            }
+
+            try self.writer.print("\n);\n", .{});
+        }
+
+        fn postamble(self: *Self) !void {
+            try self.writer.print("endmodule\n", .{});
         }
 
         // NOTE: this is not meant to be used in release builds

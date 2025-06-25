@@ -37,12 +37,14 @@ pub const TypedValue = struct {
     pub fn deserialize(item: Item, pool: *const InternPool) TypedValue {
         const tag = item.tag;
         const payload = item.payload;
+        _ = payload;
+        _ = pool;
 
         return switch (tag) {
-            .int_tv => {
-                const int = pool.wide.items[@intFromEnum(payload.wide)];
-                return .{ .ty = .int, .val = .{ .int = int } };
-            },
+            // .int_tv => {
+            //     const int = pool.wide.items[@intFromEnum(payload.wide)];
+            //     return .{ .ty = .int, .val = .{ .int = int } };
+            // },
             // .bool_tv => .{ .ty = .bool, .val = .{ .bool = payload.bool } },
             else => unreachable,
         };

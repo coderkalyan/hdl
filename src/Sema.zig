@@ -3,14 +3,15 @@ const Cst = @import("Cst.zig");
 const Air = @import("Air.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("type.zig").Type;
+const Package = @import("Package.zig");
 
 const Allocator = std.mem.Allocator;
 const Index = Air.Index;
 const Node = Air.Node;
 const Value = Air.Value;
+const Decl = Package.Decl;
 
 const Error = Allocator.Error || std.fmt.ParseIntError;
-pub var airs: std.ArrayListUnmanaged(Air) = .empty;
 
 pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -60,7 +61,7 @@ const Sema = struct {
     // FIXME: this is unsafe because it is only used in the body context
     // and undefined in the root context
     // however the whole context situation needs to be revisited
-    module_type: InternPool.Index,
+    signature: InternPool.Index,
 
     nodes: std.MultiArrayList(Node),
     extra: std.ArrayListUnmanaged(u32),
@@ -78,12 +79,22 @@ const Sema = struct {
     };
 
     pub const Context = struct {
-        // when not null, the expression being evaluated should
-        // attempt to coerce into this type
-        type: ?InternPool.Index,
+        /// The expression being evaluated should attempt to coerce
+        /// into this type, or error otherwise. If no type hint is
+        /// specified, this is `null` and the expression should infer
+        /// the type.
+        type: InternPool.Index,
+        /// The declaration (type or function) being evaluated should
+        /// adopt this name. If no name hint is specified, this is
+        /// `null` and the declaration is anonymous.
+        name: InternPool.Index,
+        /// The Decl that this expression is being assigned to.
+        // decl: ?*Decl = null,
+
+        pub const anon_type: Context = .{ .type = .null, .name = .null };
     };
 
-    pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, module_type: InternPool.Index, scope: ScopeKind) !Sema {
+    pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, signature: InternPool.Index, scope: ScopeKind) !Sema {
         var nodes: std.MultiArrayList(Node) = .empty;
         errdefer nodes.deinit(gpa);
         try nodes.append(gpa, .{ .null = {} });
@@ -94,7 +105,7 @@ const Sema = struct {
             .pool = pool,
             .cst = cst,
             .scope = scope,
-            .module_type = module_type,
+            .signature = signature,
             .nodes = nodes,
             .extra = .empty,
             .scratch = .empty,
@@ -163,6 +174,10 @@ const Sema = struct {
         });
     }
 
+    pub fn putType(self: *Sema, ty: Type) !InternPool.Index {
+        return self.pool.put(.{ .ty = ty });
+    }
+
     // no Airs are generated here, but the InternPool is populated with
     // types and identifiers, and a new analysis is called on each module body
     pub fn root(self: *Sema) !void {
@@ -171,8 +186,11 @@ const Sema = struct {
         const payload = self.cst.payload(self.cst.root);
         const slice = self.cst.indices(payload.root);
         for (slice) |cst_index| {
-            const index = try self.typeStatement(cst_index);
-            _ = index;
+            const decl = try self.typeDef(cst_index);
+            _ = decl;
+            // const ptr = self.pool.declPtr(decl);
+            // const name = self.pool.get(ptr.name).str;
+            // std.debug.print("{s}: {}\n", .{ name, ptr.* });
         }
     }
 
@@ -221,14 +239,16 @@ const Sema = struct {
         const ty, const value = if (data.type == .null) tv: {
             // type inference, so first evaluate the value, and then
             // determine its type and define the signal to that type
-            const value = try self.expression(s, data.value, .{ .type = null });
+            const ctx: Context = .{ .type = .null, .name = name };
+            const value = try self.expression(s, data.value, &ctx);
             const ty = self.tempAir().typeOf(value);
             break :tv .{ ty, value };
         } else tv: {
             // otherwise, first evaluate the type, and then use it in the
             // result context for the value (i.e. to evaluate anonymous literals)
-            const ty = try self.type(data.type);
-            const value = try self.expression(s, data.value, .{ .type = ty });
+            const ty = try self.type(data.type, &.anon_type);
+            const ctx: Context = .{ .type = ty, .name = name };
+            const value = try self.expression(s, data.value, &ctx);
             break :tv .{ ty, value };
         };
 
@@ -247,28 +267,37 @@ const Sema = struct {
     fn yield(self: *Sema, s: *Scope, index: Cst.Index) !Index {
         const data = self.cst.payload(index).yield;
 
-        const module_type = self.pool.get(self.module_type).ty.module;
-        const context: Context = .{ .type = module_type.output_type };
-        const value = try self.expression(s, data, context);
+        const signature = self.pool.get(self.signature).ty.signature;
+        const ctx: Context = .{ .type = signature.output_type, .name = .null };
+        const value = try self.expression(s, data, &ctx);
         return self.addNode(.{ .yield = value });
     }
 
-    fn typeStatement(self: *Sema, index: Cst.Index) !Index {
+    fn typeDef(self: *Sema, index: Cst.Index) !InternPool.DeclIndex {
         const data = self.cst.payload(index).type;
-        _ = try self.type(data);
+        const ident_token = self.cst.mainToken(index).advance(1);
+        const name = try self.internToken(ident_token);
 
-        // FIXME: this should not return anything, since type statements
-        // are completely internalized and do not generate any Air
-        return .null;
+        const ctx: Context = .{ .type = .null, .name = name };
+        const ty = try self.type(data, &ctx);
+
+        const decl = try self.pool.createDecl(.{
+            .kind = .type,
+            .name = name,
+            .type = ty,
+        });
+
+        try self.pool.decls_map.put(self.gpa, name, decl);
+        return decl;
     }
 
-    fn @"type"(self: *Sema, index: Cst.Index) Error!InternPool.Index {
+    fn @"type"(self: *Sema, index: Cst.Index, ctx: *const Context) Error!InternPool.Index {
         const data = self.cst.payload(index);
 
         return switch (data) {
             .ident => self.identType(index),
-            .bundle => self.bundle(index),
-            .module => self.module(index),
+            .bundle => self.bundle(index, ctx),
+            .module => self.module(index, ctx),
             else => unimplemented(),
         };
     }
@@ -300,7 +329,7 @@ const Sema = struct {
         return self.pool.put(.{ .ty = ty });
     }
 
-    fn bundle(self: *Sema, index: Cst.Index) !InternPool.Index {
+    fn bundle(self: *Sema, index: Cst.Index, ctx: *const Context) !InternPool.Index {
         const data = self.cst.payload(index).bundle;
         const items = self.cst.indices(data);
 
@@ -313,12 +342,14 @@ const Sema = struct {
             const field = self.cst.payload(idx).field;
             const token = self.cst.mainToken(idx);
             name.* = try self.internToken(token);
-            ty.* = try self.type(field);
+            ty.* = try self.type(field, &.anon_type);
         }
 
         return self.pool.put(.{
             .ty = .{
                 .bundle = .{
+                    .cst_index = index,
+                    .name = ctx.name,
                     .field_names = names,
                     .field_types = types,
                 },
@@ -326,7 +357,7 @@ const Sema = struct {
         });
     }
 
-    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ctx: Context) Error!Value {
+    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ctx: *const Context) Error!Value {
         const data = self.cst.payload(index);
 
         return switch (data) {
@@ -338,7 +369,7 @@ const Sema = struct {
         };
     }
 
-    fn identExpression(self: *Sema, s: *Scope, _: Context, index: Cst.Index) !Value {
+    fn identExpression(self: *Sema, s: *Scope, _: *const Context, index: Cst.Index) !Value {
         const token = self.cst.mainToken(index);
         const ident = try self.internToken(token);
 
@@ -355,7 +386,7 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn unary(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
+    fn unary(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).unary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
@@ -372,7 +403,7 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn binary(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
+    fn binary(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).binary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
@@ -396,18 +427,19 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn bundleLiteral(self: *Sema, s: *Scope, ctx: Context, index: Cst.Index) !Value {
+    fn bundleLiteral(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
         const data = self.cst.payload(index).bundle_literal;
         const inits = self.cst.indices(data.inits);
 
         const bundle_type = if (data.type != .null) type: {
             // if explicitly specified, no need to infer from context
-            const ty = try self.type(data.type);
+            const ty = try self.type(data.type, &.anon_type);
             break :type ty;
         } else type: {
             // otherwise use the context
             // FIXME: if this is null it is a compiler error
-            const inferred = ctx.type.?;
+            const inferred = ctx.type;
+            std.debug.assert(inferred != .null);
             break :type inferred;
         };
 
@@ -437,7 +469,7 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn module(self: *Sema, index: Cst.Index) !InternPool.Index {
+    fn module(self: *Sema, index: Cst.Index, ctx: *const Context) !InternPool.Index {
         const data = self.cst.payload(index).module;
         const ports = self.cst.payload(data.ports).ports;
         const inputs = self.cst.indices(ports.inputs);
@@ -451,23 +483,32 @@ const Sema = struct {
             const input = self.cst.payload(idx).input;
             const token = self.cst.mainToken(idx);
             const name = try self.internToken(token);
-            const ty = try self.type(input);
+            const ty = try self.type(input, &.anon_type);
 
             input_names[i] = name;
             input_types[i] = ty;
         }
 
-        const output_type = try self.type(ports.output);
-        const signature: Type = .{
-            .module = .{
+        const output_type = try self.type(ports.output, &.anon_type);
+        const signature = try self.putType(.{
+            .signature = .{
                 .input_names = input_names,
                 .input_types = input_types,
                 .output_type = output_type,
             },
-        };
-        const module_type = try self.pool.put(.{ .ty = signature });
+        });
 
-        var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, module_type, .body);
+        // const signature: Type = .{
+        //     .module = .{
+        //         .cst_index = index,
+        //         .name = ctx.name,
+        //         .input_names = input_names,
+        //         .input_types = input_types,
+        //         .output_type = output_type,
+        //     },
+        // };
+
+        var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, signature, .body);
         errdefer sema.deinit();
 
         // the parameter nodes should actually exist in the inner scope
@@ -491,8 +532,15 @@ const Sema = struct {
         }
 
         const air = try sema.body(&scope, data.body);
-        try airs.append(self.gpa, air);
-        // defer air.deinit(self.gpa);
+        const air_index = try self.pool.createAir(air);
+        const module_type = try self.putType(.{
+            .module = .{
+                .cst_index = index,
+                .name = ctx.name,
+                .signature = signature,
+                .air = air_index,
+            },
+        });
 
         return module_type;
     }
