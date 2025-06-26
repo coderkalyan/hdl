@@ -75,14 +75,17 @@ pub const Node = union(enum) {
     null,
 
     // leaf nodes - these correspond to simple values and tokens
-    // a named identifier (guaranteed to be within scope)
+
+    // A named identifier to be printed verbatim. It is guaranteed
+    // to be within scope.
     ident: struct {
-        // because the actual scoping information is not preserved,
-        // the type that the expression evaluates to is stored here
+        /// Because scope information is not preserved after semantic
+        /// analysis, the signal that this identifier corresponds to,
+        /// containing, the name and type information, is recorded here.
+        signal: Index,
+        /// Because the type of the identifier may be requested frequently,
+        /// it is cached here to avoid two indirections to check `signal`.
         type: InternPool.Index,
-        // the name of the identifier, guaranteed to be in scope
-        // and legal to print verbatim
-        name: InternPool.Index,
     },
 
     // bundle literals initialize a value of a bundle type
@@ -179,7 +182,7 @@ pub const Node = union(enum) {
     // this is used for (usually sequential) feedback loops
     // main_token is the `decl` which can be used to seek to the name token
     // no value here, so the index is the type
-    decl: Signal,
+    decl: ExtraIndex,
 
     // reference to a module parameter by index
     // the identifier name is also cached here
@@ -210,6 +213,7 @@ pub const Node = union(enum) {
     pub const Signal = struct {
         type: InternPool.Index,
         name: InternPool.Index,
+        salt: u32,
     };
 
     pub const Tag = std.meta.Tag(Node);
@@ -230,7 +234,10 @@ pub fn extraData(self: *const Air, index: ExtraIndex, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields, 0..) |field, i| {
-        @field(result, field.name) = @enumFromInt(self.extra[base + i]);
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.extra[base + i],
+            inline else => @enumFromInt(self.extra[base + i]),
+        };
     }
     return result;
 }
@@ -285,7 +292,7 @@ pub fn typeOf(self: *const Air, value: Value) InternPool.Index {
         // FIXME: implement these two aggregate accessors
         .subscript, .member => unreachable,
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,
-        .decl => |signal| signal.type,
+        .decl => |signal| self.extraData(signal, Air.Node.Signal).type,
         .param => |param| param.type,
         .yield => |v| self.typeOf(v),
         .block, .toplevel => unreachable,

@@ -214,7 +214,15 @@ fn CodeGen(WriterType: type) type {
                 const datatype = try self.type(target.?.type);
                 const name = target.?.name;
                 const expr = try self.formatExpression(value.?);
-                try self.writer.print("wire {s} {s} = {s};\n", .{ datatype, name, expr });
+                try self.writer.print("wire", .{});
+                if (datatype.len > 0) {
+                    try self.writer.print(" {s}", .{datatype});
+                }
+                try self.writer.print(" {s}", .{name});
+                if (signal.salt > 0) {
+                    try self.writer.print("${}", .{signal.salt});
+                }
+                try self.writer.print(" = {s};\n", .{expr});
             }
         }
 
@@ -303,8 +311,27 @@ fn CodeGen(WriterType: type) type {
 
         fn ident(self: *Self, index: Index) !void {
             const data = self.air.get(index).ident;
-            const str = self.pool.get(data.name).str;
+            const name, const salt = switch (self.air.get(data.signal)) {
+                .def => |pl| name: {
+                    const extra = self.air.extraData(pl.signal, Node.Signal);
+                    break :name .{ extra.name, extra.salt };
+                },
+                .decl => |signal| name: {
+                    const extra = self.air.extraData(signal, Node.Signal);
+                    break :name .{ extra.name, extra.salt };
+                },
+                .param => |param| name: {
+                    const signature = self.pool.get(self.module.signature).ty.signature;
+                    break :name .{ signature.input_names[param.index], 0 };
+                },
+                else => unreachable,
+            };
+
+            const str = self.pool.get(name).str;
             try self.bytes.appendSlice(self.arena, str);
+            if (salt > 0) {
+                try self.bytes.writer(self.arena).print("${}", .{salt});
+            }
         }
 
         fn bundleLiteral(self: *Self, index: Index) !void {
@@ -421,7 +448,9 @@ fn CodeGen(WriterType: type) type {
                 var targets = try self.iterateTarget(name, ty);
                 while (try targets.next()) |target| {
                     const ts = try self.type(target.type);
-                    try self.writer.print("input wire {s} {s}", .{ ts, target.name });
+                    try self.writer.print("input wire", .{});
+                    if (ts.len > 0) try self.writer.print(" {s}", .{ts});
+                    try self.writer.print(" {s}", .{target.name});
                     try self.writer.print(", ", .{});
                     try self.writer.print("\n", .{});
                 }
@@ -432,7 +461,9 @@ fn CodeGen(WriterType: type) type {
                 if (!first) try self.writer.print(",\n", .{});
                 first = false;
                 const ts = try self.type(target.type);
-                try self.writer.print("output wire {s} {s}", .{ ts, target.name });
+                try self.writer.print("output wire", .{});
+                if (ts.len > 0) try self.writer.print(" {s}", .{ts});
+                try self.writer.print(" {s}", .{target.name});
             }
 
             try self.writer.print("\n);\n", .{});

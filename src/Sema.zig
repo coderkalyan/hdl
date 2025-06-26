@@ -34,18 +34,73 @@ pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
 
 // NOTE: in Zig 0.15 std.SinglyLinkedList is an intrusive list
 // so we can migrate to it
-const Scope = struct {
-    kind: Kind,
-    // FIXME: because this map only contains named signals,
-    // which are always defined (not anonymous expressions)
-    // we should use Index here and not Value
-    map: std.AutoHashMapUnmanaged(InternPool.Index, Value),
-    parent: ?*Scope,
+// const Scope = struct {
+//     kind: Kind,
+//     // FIXME: because this map only contains named signals,
+//     // which are always defined (not anonymous expressions)
+//     // we should use Index here and not Value
+//     map: std.AutoHashMapUnmanaged(InternPool.Index, Value),
+//     parent: ?*Scope,
+//
+//     const Kind = enum {
+//         toplevel,
+//         body,
+//     };
+// };
 
-    const Kind = enum {
+const Scope = struct {
+    parent: ?*Scope,
+    payload: Payload,
+
+    pub const Payload = union(enum) {
+        /// Toplevel scope, does not contain anything.
         toplevel,
-        body,
+        /// Namespace (for example toplevel package) with signal
+        /// and type definitions. Names are unique within the
+        /// namespace (no shadowing) and unordered.
+        namespace: std.AutoHashMapUnmanaged(InternPool.Index, Index),
+        /// A signal definition with name and value node.
+        def: struct {
+            name: InternPool.Index,
+            index: Index,
+        },
+        /// A signal declaration with no value.
+        decl: InternPool.Index,
+        /// A type definition with name and interned type.
+        type: struct {
+            name: InternPool.Index,
+            type: InternPool.Index,
+        },
     };
+
+    pub fn resolve(scope: *Scope, name: InternPool.Index) ?*Scope {
+        var s = scope;
+        while (true) {
+            switch (s.payload) {
+                .toplevel => return null,
+                inline .def, .type => |*pl| if (pl.name == name) return s,
+                .decl => |pl| if (pl == name) return s,
+                .namespace => |*map| {
+                    if (map.contains(name)) return s;
+                },
+            }
+
+            s = s.parent.?;
+        }
+    }
+
+    pub fn count(scope: *Scope, name: InternPool.Index) u32 {
+        var i: u32 = 0;
+        var s = scope;
+        while (true) {
+            if (s.resolve(name)) |next| {
+                s = next.parent.?;
+                i += 1;
+            } else break;
+        }
+
+        return i;
+    }
 };
 
 // TODO: pull this out into the file struct itself
@@ -135,6 +190,10 @@ const Sema = struct {
         try self.extra.ensureUnusedCapacity(self.gpa, struct_fields.len);
         inline for (struct_fields) |struct_field| {
             switch (struct_field.type) {
+                u32 => {
+                    const num = @field(extra, struct_field.name);
+                    self.extra.appendAssumeCapacity(num);
+                },
                 inline else => {
                     const num = @intFromEnum(@field(extra, struct_field.name));
                     self.extra.appendAssumeCapacity(num);
@@ -213,15 +272,16 @@ const Sema = struct {
         };
     }
 
-    fn block(self: *Sema, s: *Scope, index: Cst.Index) !Index {
+    fn block(self: *Sema, scope: *Scope, index: Cst.Index) !Index {
         const data = self.cst.payload(index).block;
         const slice = self.cst.indices(data);
+        var s = scope;
 
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
         try self.scratch.ensureUnusedCapacity(self.arena, slice.len);
         for (slice) |i| {
-            const ai = try self.statement(s, i);
+            const ai, s = try self.statement(s, i);
             self.scratch.appendAssumeCapacity(@intFromEnum(ai));
         }
 
@@ -230,38 +290,55 @@ const Sema = struct {
         return self.addNode(.{ .block = nodes });
     }
 
-    fn statement(self: *Sema, s: *Scope, index: Cst.Index) !Index {
+    fn statement(self: *Sema, s: *Scope, index: Cst.Index) !struct { Index, *Scope } {
         const data = self.cst.payload(index);
 
         return switch (data) {
             .def => self.def(s, index),
-            .yield => self.yield(s, index),
+            .yield => .{ try self.yield(s, index), s },
             else => unimplemented(),
         };
     }
 
-    fn def(self: *Sema, s: *Scope, index: Cst.Index) !Index {
+    fn def(self: *Sema, s: *Scope, index: Cst.Index) !struct { Index, *Scope } {
         const data = self.cst.payload(index).def;
         const ident_token = self.cst.mainToken(index).advance(1);
         const name = try self.internToken(ident_token);
 
+        // Name shadowing is allowed within a body, but with restrictions.
+        const resolved = s.resolve(name);
+        if (resolved) |f| {
+            switch (f.payload) {
+                // Signal names cannot shadow existing type names.
+                .type => {
+                    try self.addError(.shadow_signal_type, ident_token);
+                    return error.SourceError;
+                },
+                else => {},
+            }
+        }
+
+        // Record the salt information to de-duplicate name shadowing.
+        const salt = s.count(name);
+
         const ty, const value = if (data.type == .null) tv: {
-            // type inference, so first evaluate the value, and then
-            // determine its type and define the signal to that type
+            // Type inference, so first evaluate the value, and then
+            // determine its type and define the signal to that type.
             const ctx: Context = .{ .type = .null, .name = name };
             const value = try self.expression(s, data.value, &ctx);
             const ty = self.tempAir().typeOf(value);
             break :tv .{ ty, value };
         } else tv: {
-            // otherwise, first evaluate the type, and then use it in the
-            // result context for the value (i.e. to evaluate anonymous literals)
+            // Otherwise, first evaluate the type, and then use it in the
+            // result context for the value (i.e. to evaluate anonymous
+            // literals).
             const ty = try self.type(data.type, &.anon_type);
             const ctx: Context = .{ .type = ty, .name = name };
             const value = try self.expression(s, data.value, &ctx);
             break :tv .{ ty, value };
         };
 
-        const signal: Node.Signal = .{ .name = name, .type = ty };
+        const signal: Node.Signal = .{ .name = name, .type = ty, .salt = salt };
         const node = try self.addNode(.{
             .def = .{
                 .signal = try self.addExtra(signal),
@@ -269,8 +346,18 @@ const Sema = struct {
             },
         });
 
-        try s.map.put(self.arena, signal.name, Value.index(node));
-        return node;
+        const scope = try self.arena.create(Scope);
+        scope.* = .{
+            .parent = s,
+            .payload = .{
+                .def = .{
+                    .name = signal.name,
+                    .index = node,
+                },
+            },
+        };
+
+        return .{ node, scope };
     }
 
     fn yield(self: *Sema, s: *Scope, index: Cst.Index) !Index {
@@ -382,18 +469,19 @@ const Sema = struct {
         const token = self.cst.mainToken(index);
         const ident = try self.internToken(token);
 
-        // FIXME: implement traversal across the scope list
-
-        // the map points to the def or decl node, which knows its type
-        const value = s.map.get(ident) orelse {
+        const resolved = s.resolve(ident);
+        const signal = if (resolved) |rs| v: {
+            break :v rs.payload.def.index;
+        } else {
             try self.addError(.unknown_identifier, token);
             return error.SourceError;
         };
 
+        const ty = self.tempAir().typeOf(Value.index(signal));
         const node = try self.addNode(.{
             .ident = .{
-                .type = self.tempAir().typeOf(value),
-                .name = ident,
+                .signal = signal,
+                .type = ty,
             },
         });
         return Value.index(node);
@@ -525,13 +613,13 @@ const Sema = struct {
         errdefer sema.deinit();
 
         // the parameter nodes should actually exist in the inner scope
-        var scope: Scope = .{
-            .kind = .body,
-            .map = .empty,
+        var toplevel: Scope = .{
             .parent = null,
+            .payload = .{ .toplevel = {} },
         };
-        const map = &scope.map;
-        try map.ensureUnusedCapacity(self.arena, @intCast(inputs.len));
+
+        var scope = &toplevel;
+        const scopes = try self.arena.alloc(Scope, inputs.len);
         for (input_names, input_types, 0..) |name, ty, i| {
             const param = try sema.addNode(.{
                 .param = .{
@@ -540,11 +628,19 @@ const Sema = struct {
                 },
             });
 
-            const value = Value.index(param);
-            map.putAssumeCapacity(name, value);
+            scopes[i] = .{
+                .parent = scope,
+                .payload = .{
+                    .def = .{
+                        .name = name,
+                        .index = param,
+                    },
+                },
+            };
+            scope = &scopes[i];
         }
 
-        const air = sema.body(&scope, data.body) catch |err| {
+        const air = sema.body(scope, data.body) catch |err| {
             if (err == error.SourceError) {
                 const stderr = std.io.getStdErr().writer();
                 const errors = try error_handler.LocatedSourceError.locateErrors(self.gpa, self.cst, sema.errors.items);

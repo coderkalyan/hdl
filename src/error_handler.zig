@@ -27,6 +27,8 @@ pub const SourceError = struct {
         // missing_expression,
         // unexpected_token,
 
+        shadow_signal_type,
+        shadow_type_signal,
         unknown_identifier,
         // shadows_builtin_type,
         // shadows_keyword,
@@ -130,8 +132,9 @@ pub fn CompileErrorRenderer(comptime width: u32, comptime WriterType: anytype) t
         }
 
         pub fn render(r: *Self) !void {
-            for (r.errors) |src_error| {
+            for (r.errors, 0..) |src_error, i| {
                 try r.formatError(src_error);
+                if (i < r.errors.len - 1) try r.stream.newline();
             }
         }
 
@@ -160,6 +163,8 @@ pub fn CompileErrorRenderer(comptime width: u32, comptime WriterType: anytype) t
                 // .unmatched_brace => "unmatched brace",
                 // .unmatched_parenth => "Unmatched parenthesis",
                 // .unexpected_token => "unexpected token",
+                .shadow_signal_type => "Signal name cannot shadow existing type name",
+                .shadow_type_signal => "Type name cannot shadow existing signal name",
                 // .shadows_builtin_type => "identifier shadows builtin type",
                 // .shadows_keyword => "identifier shadows builtin keyword",
                 // .named_var_type_context => "use of variable identifier in type expression",
@@ -205,8 +210,6 @@ pub fn CompileErrorRenderer(comptime width: u32, comptime WriterType: anytype) t
             try writer.print("\x1b[1;32m", .{});
             try writer.writeByteNTimes('^', r.cst.tokenString(err.src_error.token).len);
             try writer.print(" here\x1b[0m", .{});
-            try r.stream.newline();
-
             r.stream.dedent();
             try r.stream.newline();
         }
