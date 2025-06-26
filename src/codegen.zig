@@ -255,6 +255,7 @@ fn CodeGen(WriterType: type) type {
                     try writer.print("[{}:0]", .{width - 1});
                     return self.bytes.items[bytes_top..];
                 },
+                .bool => return "",
                 else => unreachable,
             }
         }
@@ -278,7 +279,7 @@ fn CodeGen(WriterType: type) type {
             std.debug.assert(value.tag == .index);
             const index = value.payload.index;
 
-            const tag = self.air.tag(index);
+            // const tag = self.air.tag(index);
             switch (self.air.get(index)) {
                 .null => unreachable,
                 .ident => try self.ident(index),
@@ -292,12 +293,12 @@ fn CodeGen(WriterType: type) type {
                 .band => try self.band(index),
                 .bor => try self.bor(index),
                 .bxor => try self.bxor(index),
-                .iadd,
-                .isub,
-                .land,
-                .lor,
-                => |pl| try self.binary(tag, pl),
-                .lxor,
+                .iadd => try self.iadd(index),
+                .isub => try self.isub(index),
+                .land => try self.land(index),
+                .lor => try self.lor(index),
+                .lxor => try self.lxor(index),
+                .limplies => try self.limplies(index),
                 .def,
                 .decl,
                 .yield,
@@ -422,21 +423,86 @@ fn CodeGen(WriterType: type) type {
             try self.expression(data.r);
         }
 
-        fn binary(self: *Self, tag: Node.Tag, data: Node.Binary) !void {
-            // FIXME: split this up so we can assert types
-            const op = switch (tag) {
-                .iadd => "+",
-                .isub => "-",
-                // NOTE: this can also be the logical operators &&, ||, and !=
-                // which is just a stylistic choice that should be exposed
-                .land => "&",
-                .lor => "|",
-                .lxor => "^",
-                else => unreachable,
+        fn land(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
             };
+            std.debug.assert(ty == .bool);
 
-            try self.writer.print(" {s} ", .{op});
+            const data = self.air.get(index).land;
+            try self.expression(data.l);
+            try self.bytes.appendSlice(self.arena, " & ");
             try self.expression(data.r);
+        }
+
+        fn lor(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert(ty == .bool);
+
+            const data = self.air.get(index).lor;
+            try self.expression(data.l);
+            try self.bytes.appendSlice(self.arena, " | ");
+            try self.expression(data.r);
+        }
+
+        fn lxor(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert(ty == .bool);
+
+            const data = self.air.get(index).lxor;
+            try self.expression(data.l);
+            try self.bytes.appendSlice(self.arena, " ^ ");
+            try self.expression(data.r);
+        }
+
+        fn limplies(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert(ty == .bool);
+
+            const data = self.air.get(index).limplies;
+            try self.bytes.appendSlice(self.arena, "(~");
+            try self.expression(data.l);
+            try self.bytes.appendSlice(self.arena, " | ");
+            try self.expression(data.r);
+            try self.bytes.appendSlice(self.arena, ")");
+        }
+
+        fn iadd(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert((ty == .sint) or (ty == .uint));
+
+            const data = self.air.get(index).iadd;
+            const bin = self.air.extraData(data.bin, Node.Binary);
+            try self.expression(bin.l);
+            try self.bytes.appendSlice(self.arena, " + ");
+            try self.expression(bin.r);
+        }
+
+        fn isub(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.air.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert((ty == .sint) or (ty == .uint));
+
+            const data = self.air.get(index).isub;
+            const bin = self.air.extraData(data.bin, Node.Binary);
+            try self.expression(bin.l);
+            try self.bytes.appendSlice(self.arena, " - ");
+            try self.expression(bin.r);
         }
 
         fn preamble(self: *Self) !void {

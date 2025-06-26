@@ -1,5 +1,6 @@
 const std = @import("std");
 const InternPool = @import("InternPool.zig");
+const Type = @import("type.zig").Type;
 
 const Allocator = std.mem.Allocator;
 const Air = @This();
@@ -134,9 +135,19 @@ pub const Node = union(enum) {
 
     // binary operators
     // integer addition
-    iadd: Binary,
+    iadd: struct {
+        /// `Binary` expression data.
+        bin: ExtraIndex,
+        /// Type of resulting expression.
+        type: InternPool.Index,
+    },
     // integer subtraction
-    isub: Binary,
+    isub: struct {
+        /// `Binary` expression data.
+        bin: ExtraIndex,
+        /// Type of resulting expression.
+        type: InternPool.Index,
+    },
     // bitwise and
     band: Binary,
     // bitwise or
@@ -219,6 +230,7 @@ pub const Node = union(enum) {
     pub const Tag = std.meta.Tag(Node);
 };
 
+// pool: *const InternPool,
 nodes: std.MultiArrayList(Node).Slice,
 extra: []const u32,
 body: Index,
@@ -236,6 +248,7 @@ pub fn extraData(self: *const Air, index: ExtraIndex, comptime T: type) T {
     inline for (fields, 0..) |field, i| {
         @field(result, field.name) = switch (field.type) {
             u32 => self.extra[base + i],
+            Value => @bitCast(self.extra[base + i]),
             inline else => @enumFromInt(self.extra[base + i]),
         };
     }
@@ -287,8 +300,23 @@ pub fn typeOf(self: *const Air, value: Value) InternPool.Index {
         .bnot => |v| self.typeOf(v),
         .lnot => .bool,
         .paren => |v| self.typeOf(v),
-        .iadd, .isub, .band, .bor, .bxor => |v| self.typeOf(v.l),
-        .land, .lor, .lxor, .limplies => .bool,
+        .band, .bor, .bxor => |v| self.typeOf(v.l),
+        inline .iadd, .isub => |pl| pl.type,
+        //     .iadd => |v| ty: {
+        //         const src = self.pool.get(self.typeOf(v.l)).ty;
+        //         const dst: Type = switch (src) {
+        //             .uint => |bits| .{ .uint = bits + 1 },
+        //             // FIXME: implement
+        //             .sint => unreachable,
+        //             else => unreachable,
+        //         };
+        // break :ty try self.pool.put(.{ .ty = dst });
+        //     },
+        .land,
+        .lor,
+        .lxor,
+        .limplies,
+        => .bool,
         // FIXME: implement these two aggregate accessors
         .subscript, .member => unreachable,
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,

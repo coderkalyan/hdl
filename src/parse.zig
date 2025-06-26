@@ -216,8 +216,11 @@ pub const Parser = struct {
     // from infix notation
     inline fn precedence(tag: Token.Tag) i32 {
         return switch (tag) {
+            // FIXME: revisit all of these
             .k_or => 10,
             .k_and => 11,
+            .k_xor => 12,
+            .k_implies => 12,
             .equal_equal => 13,
             .bang_equal => 13,
             .l_angle => 14,

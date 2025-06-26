@@ -194,6 +194,11 @@ const Sema = struct {
                     const num = @field(extra, struct_field.name);
                     self.extra.appendAssumeCapacity(num);
                 },
+                Air.Value => {
+                    const value = @field(extra, struct_field.name);
+                    const num: u32 = @bitCast(value);
+                    self.extra.appendAssumeCapacity(num);
+                },
                 inline else => {
                     const num = @intFromEnum(@field(extra, struct_field.name));
                     self.extra.appendAssumeCapacity(num);
@@ -308,13 +313,10 @@ const Sema = struct {
         // Name shadowing is allowed within a body, but with restrictions.
         const resolved = s.resolve(name);
         if (resolved) |f| {
-            switch (f.payload) {
-                // Signal names cannot shadow existing type names.
-                .type => {
-                    try self.addError(.shadow_signal_type, ident_token);
-                    return error.SourceError;
-                },
-                else => {},
+            // Signal names cannot shadow existing type names.
+            if (f.payload == .type) {
+                try self.addError(.shadow_signal_type, ident_token);
+                return error.SourceError;
             }
         }
 
@@ -402,8 +404,12 @@ const Sema = struct {
         const token = self.cst.mainToken(index);
         const str = self.cst.tokenString(token);
 
+        if (std.mem.eql(u8, str, "bool")) return .bool;
+
         const builtin: ?InternPool.Index = switch (str[0]) {
             'b' => try self.bits(str),
+            'u' => try self.uint(str),
+            'i' => try self.sint(str),
             else => null,
         };
 
@@ -422,6 +428,24 @@ const Sema = struct {
 
         const width = try std.fmt.parseInt(u32, str[1..], 10);
         const ty: Type = .{ .bits = width };
+        return self.pool.put(.{ .ty = ty });
+    }
+
+    fn uint(self: *Sema, str: []const u8) !InternPool.Index {
+        std.debug.assert(str.len > 1);
+        std.debug.assert(str[0] == 'u');
+
+        const width = try std.fmt.parseInt(u32, str[1..], 10);
+        const ty: Type = .{ .uint = width };
+        return self.pool.put(.{ .ty = ty });
+    }
+
+    fn sint(self: *Sema, str: []const u8) !InternPool.Index {
+        std.debug.assert(str.len > 1);
+        std.debug.assert(str[0] == 'i');
+
+        const width = try std.fmt.parseInt(u32, str[1..], 10);
+        const ty: Type = .{ .sint = width };
         return self.pool.put(.{ .ty = ty });
     }
 
@@ -465,10 +489,14 @@ const Sema = struct {
         };
     }
 
-    fn identExpression(self: *Sema, s: *Scope, _: *const Context, index: Cst.Index) !Value {
+    fn identExpression(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
         const token = self.cst.mainToken(index);
         const ident = try self.internToken(token);
 
+        // Resolve the identifer in the current scope to validate
+        // its existence. If valid, the signal is recorded and the
+        // identifier is re-emitted, not inlined (because this is
+        // a source to source translation).
         const resolved = s.resolve(ident);
         const signal = if (resolved) |rs| v: {
             break :v rs.payload.def.index;
@@ -477,7 +505,14 @@ const Sema = struct {
             return error.SourceError;
         };
 
+        // If a type hint is provided in the context, validate it
+        // against the type of the signal that was resolved.
         const ty = self.tempAir().typeOf(Value.index(signal));
+        if (ctx.type != .null and ctx.type != ty) {
+            try self.addError(.type_coerce_fail, token);
+            return error.SourceError;
+        }
+
         const node = try self.addNode(.{
             .ident = .{
                 .signal = signal,
@@ -509,15 +544,79 @@ const Sema = struct {
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const l = try self.expression(s, data.l, ctx);
-        const r = try self.expression(s, data.r, ctx);
+        const inner_ctx: *const Context = switch (operator) {
+            .k_and, .k_or, .k_xor, .k_implies => &.{ .type = .bool, .name = ctx.name },
+            else => &.{ .type = .null, .name = ctx.name },
+        };
+
+        const l = try self.expression(s, data.l, inner_ctx);
+        const r = try self.expression(s, data.r, inner_ctx);
+
+        // check that both expressions have the same type
+        const lty = self.tempAir().typeOf(l);
+        const rty = self.tempAir().typeOf(r);
+        if (lty != rty) {
+            try self.addError(.type_binary_diff, main_token);
+            return error.SourceError;
+        }
+
+        // check that the expression type is compatible with the operator
+        const ty = self.pool.get(lty).ty;
+        const valid = switch (operator) {
+            .plus,
+            .minus,
+            => ty == .uint or ty == .sint,
+            .ampersand,
+            .pipe,
+            .caret,
+            => ty == .bits or ty == .uint or ty == .sint,
+            .k_and,
+            .k_or,
+            .k_xor,
+            .k_implies,
+            => ty == .bool,
+            else => self.unexpectedToken(main_token),
+        };
+        if (!valid) {
+            try self.addError(.type_binary_invalid, main_token);
+            return error.SourceError;
+        }
+
+        const dty = switch (operator) {
+            .plus => ty: {
+                const src = self.pool.get(lty).ty;
+                const dst: Type = switch (src) {
+                    .uint => |width| .{ .uint = width + 1 },
+                    .sint => unimplemented(),
+                    else => unreachable,
+                };
+
+                break :ty try self.pool.put(.{ .ty = dst });
+            },
+            .minus => unimplemented(),
+            else => lty,
+        };
+
+        // If a type hint is provided in the context, validate it
+        // against the type of the signal that was resolved.
+        if (ctx.type != .null and ctx.type != dty) {
+            try self.addError(.type_coerce_fail, main_token);
+            return error.SourceError;
+        }
+
         const bin: Node.Binary = .{ .l = l, .r = r };
         const node: Node = switch (operator) {
-            .plus => .{ .iadd = bin },
-            .minus => .{ .isub = bin },
             .ampersand => .{ .band = bin },
             .pipe => .{ .bor = bin },
             .caret => .{ .bxor = bin },
+            .plus => node: {
+                const extra = try self.addExtra(bin);
+                break :node .{ .iadd = .{ .bin = extra, .type = dty } };
+            },
+            .minus => node: {
+                const extra = try self.addExtra(bin);
+                break :node .{ .isub = .{ .bin = extra, .type = dty } };
+            },
             .k_and => .{ .land = bin },
             .k_or => .{ .lor = bin },
             .k_xor => .{ .lxor = bin },
