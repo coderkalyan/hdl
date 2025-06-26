@@ -528,6 +528,23 @@ const Sema = struct {
         const operator = self.cst.tokenTag(main_token);
 
         const inner = try self.expression(s, data, ctx);
+
+        // check that the expression type is compatible with the operator
+        const ty = self.tempAir().typeOf(inner);
+        const dty = self.pool.get(ty).ty;
+        const valid = switch (operator) {
+            // TODO: is this correct, what does negating unsigned mean?
+            .minus => dty == .uint or dty == .sint,
+            .tilde => dty == .uint or dty == .sint or dty == .bits,
+            .k_not => dty == .bool,
+            .l_paren => true,
+            else => self.unexpectedToken(main_token),
+        };
+        if (!valid) {
+            try self.addError(.type_unary_invalid, main_token);
+            return error.SourceError;
+        }
+
         const node: Node = switch (operator) {
             .minus => .{ .ineg = inner },
             .tilde => .{ .bnot = inner },

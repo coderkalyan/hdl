@@ -373,7 +373,7 @@ fn CodeGen(WriterType: type) type {
             std.debug.assert(self.pool.get(ty).ty == .bool);
 
             const data = self.air.get(index).lnot;
-            try self.bytes.appendSlice(self.arena, "!");
+            try self.bytes.appendSlice(self.arena, "~");
             try self.expression(data);
         }
 
@@ -517,7 +517,7 @@ fn CodeGen(WriterType: type) type {
                     try self.writer.print("input wire", .{});
                     if (ts.len > 0) try self.writer.print(" {s}", .{ts});
                     try self.writer.print(" {s}", .{target.name});
-                    try self.writer.print(", ", .{});
+                    try self.writer.print(",", .{});
                     try self.writer.print("\n", .{});
                 }
             }
