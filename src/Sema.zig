@@ -4,14 +4,16 @@ const Air = @import("Air.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("type.zig").Type;
 const Package = @import("Package.zig");
+const error_handler = @import("error_handler.zig");
 
 const Allocator = std.mem.Allocator;
 const Index = Air.Index;
 const Node = Air.Node;
 const Value = Air.Value;
 const Decl = Package.Decl;
+const SourceError = error_handler.SourceError;
 
-const Error = Allocator.Error || std.fmt.ParseIntError;
+const Error = Allocator.Error || std.fmt.ParseIntError || std.posix.WriteError || error{SourceError};
 
 pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -19,7 +21,7 @@ pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
 
     // NOTE: this prevents a memory leak if the parser fails, but ownership should be
     // changed if we eventually want to print something using the source on failure
-    errdefer cst.deinit(gpa);
+    // errdefer cst.deinit(gpa);
 
     var sema = try Sema.init(gpa, arena.allocator(), pool, cst, undefined, .root);
     defer sema.deinit();
@@ -66,6 +68,7 @@ const Sema = struct {
     nodes: std.MultiArrayList(Node),
     extra: std.ArrayListUnmanaged(u32),
     scratch: std.ArrayListUnmanaged(u32),
+    errors: std.ArrayListUnmanaged(SourceError),
 
     pub const ScopeKind = enum {
         // dispatched once at the root of the CST
@@ -109,6 +112,7 @@ const Sema = struct {
             .nodes = nodes,
             .extra = .empty,
             .scratch = .empty,
+            .errors = .empty,
         };
     }
 
@@ -116,6 +120,7 @@ const Sema = struct {
         self.nodes.deinit(self.gpa);
         self.extra.deinit(self.gpa);
         self.scratch.deinit(self.arena);
+        self.errors.deinit(self.arena);
     }
 
     fn addNode(self: *Sema, node: Node) !Index {
@@ -176,6 +181,10 @@ const Sema = struct {
 
     pub fn putType(self: *Sema, ty: Type) !InternPool.Index {
         return self.pool.put(.{ .ty = ty });
+    }
+
+    pub fn addError(self: *Sema, tag: SourceError.Tag, token: Cst.TokenIndex) !void {
+        try self.errors.append(self.arena, .{ .tag = tag, .token = token });
     }
 
     // no Airs are generated here, but the InternPool is populated with
@@ -374,9 +383,13 @@ const Sema = struct {
         const ident = try self.internToken(token);
 
         // FIXME: implement traversal across the scope list
-        std.debug.assert(s.map.contains(ident));
+
         // the map points to the def or decl node, which knows its type
-        const value = s.map.get(ident).?;
+        const value = s.map.get(ident) orelse {
+            try self.addError(.unknown_identifier, token);
+            return error.SourceError;
+        };
+
         const node = try self.addNode(.{
             .ident = .{
                 .type = self.tempAir().typeOf(value),
@@ -531,7 +544,18 @@ const Sema = struct {
             map.putAssumeCapacity(name, value);
         }
 
-        const air = try sema.body(&scope, data.body);
+        const air = sema.body(&scope, data.body) catch |err| {
+            if (err == error.SourceError) {
+                const stderr = std.io.getStdErr().writer();
+                const errors = try error_handler.LocatedSourceError.locateErrors(self.gpa, self.cst, sema.errors.items);
+                defer self.gpa.free(errors);
+                var render: error_handler.CompileErrorRenderer(4, @TypeOf(stderr)) = .init(stderr, self.arena, self.cst, "main.hdl", errors);
+                try render.render();
+            }
+
+            return err;
+        };
+
         const air_index = try self.pool.createAir(air);
         const module_type = try self.putType(.{
             .module = .{

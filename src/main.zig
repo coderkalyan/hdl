@@ -54,7 +54,10 @@ pub fn main() !void {
     var pool = try InternPool.init(gpa);
     defer pool.deinit();
 
-    try Sema.analyze(gpa, &pool, &tree);
+    Sema.analyze(gpa, &pool, &tree) catch |err| switch (err) {
+        error.SourceError => return,
+        else => return err,
+    };
 
     const stdout = std.io.getStdOut().writer();
 

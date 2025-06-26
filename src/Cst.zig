@@ -4,9 +4,10 @@ const parse = @import("parse.zig");
 
 const Allocator = std.mem.Allocator;
 const Lexer = lex.Lexer;
-const ByteOffset = lex.ByteOffset;
 const Parser = parse.Parser;
 const Cst = @This();
+
+pub const ByteOffset = lex.ByteOffset;
 
 // lighter version of lex.Token, doesn't include the end index
 // even though the lexer generates end offsets, storing them
