@@ -2,6 +2,7 @@ const std = @import("std");
 const Air = @import("Air.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("type.zig").Type;
+const indenting_writer = @import("indenting_writer.zig");
 
 const Allocator = std.mem.Allocator;
 const GenericWriter = std.io.GenericWriter;
@@ -9,6 +10,8 @@ const GenericWriter = std.io.GenericWriter;
 const Node = Air.Node;
 const Index = Air.Index;
 const Value = Air.Value;
+const IndentingWriter = indenting_writer.IndentingWriter;
+const indentingWriter = indenting_writer.indentingWriter;
 
 pub fn generate(gpa: Allocator, writer: anytype, pool: *const InternPool, module: Type.Module) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -18,7 +21,7 @@ pub fn generate(gpa: Allocator, writer: anytype, pool: *const InternPool, module
     var codegen: CodeGen(@TypeOf(writer)) = .{
         .gpa = gpa,
         .arena = arena.allocator(),
-        .writer = writer,
+        .writer = indentingWriter(4, writer),
         .pool = pool,
         .module = module,
         .air = air,
@@ -35,7 +38,7 @@ fn CodeGen(WriterType: type) type {
     return struct {
         gpa: Allocator,
         arena: Allocator,
-        writer: WriterType,
+        writer: IndentingWriter(4, WriterType),
         module: Type.Module,
         air: *const Air,
         pool: *const InternPool,
@@ -222,7 +225,8 @@ fn CodeGen(WriterType: type) type {
                 if (signal.salt > 0) {
                     try self.writer.print("${}", .{signal.salt});
                 }
-                try self.writer.print(" = {s};\n", .{expr});
+                try self.writer.print(" = {s};", .{expr});
+                try self.writer.newline();
             }
         }
 
@@ -509,7 +513,9 @@ fn CodeGen(WriterType: type) type {
             const module_name = self.pool.get(self.module.name).str;
             const signature = self.pool.get(self.module.signature).ty.signature;
 
-            try self.writer.print("module {s} (\n", .{module_name});
+            try self.writer.print("module {s} (", .{module_name});
+            self.writer.indent();
+            try self.writer.newline();
             for (signature.input_names, signature.input_types) |name, ty| {
                 var targets = try self.iterateTarget(name, ty);
                 while (try targets.next()) |target| {
@@ -518,13 +524,16 @@ fn CodeGen(WriterType: type) type {
                     if (ts.len > 0) try self.writer.print(" {s}", .{ts});
                     try self.writer.print(" {s}", .{target.name});
                     try self.writer.print(",", .{});
-                    try self.writer.print("\n", .{});
+                    try self.writer.newline();
                 }
             }
             var targets = try self.iterateTarget(.builtin_out, signature.output_type);
             var first = true;
             while (try targets.next()) |target| {
-                if (!first) try self.writer.print(",\n", .{});
+                if (!first) {
+                    try self.writer.print(",", .{});
+                    try self.writer.newline();
+                }
                 first = false;
                 const ts = try self.type(target.type);
                 try self.writer.print("output wire", .{});
@@ -532,11 +541,17 @@ fn CodeGen(WriterType: type) type {
                 try self.writer.print(" {s}", .{target.name});
             }
 
-            try self.writer.print("\n);\n", .{});
+            self.writer.dedent();
+            try self.writer.newline();
+            try self.writer.print(");", .{});
+            self.writer.indent();
+            try self.writer.newline();
         }
 
         fn postamble(self: *Self) !void {
-            try self.writer.print("endmodule\n", .{});
+            self.writer.dedent();
+            try self.writer.print("endmodule", .{});
+            try self.writer.newline();
         }
 
         // NOTE: this is not meant to be used in release builds

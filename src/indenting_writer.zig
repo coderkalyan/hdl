@@ -1,7 +1,7 @@
 const std = @import("std");
 const io = std.io;
 
-fn IndentingWriter(comptime width: u32, comptime WriterType: type) type {
+pub fn IndentingWriter(comptime width: u32, comptime WriterType: type) type {
     return struct {
         depth: u32,
         underlying_writer: WriterType,
@@ -43,9 +43,14 @@ fn IndentingWriter(comptime width: u32, comptime WriterType: type) type {
             if (self.needs_indent) try self.writeIndent();
             return self.underlying_writer.write(bytes);
         }
+
+        pub fn print(self: *Self, comptime format: []const u8, args: anytype) Error!void {
+            if (self.needs_indent) try self.writeIndent();
+            return self.underlying_writer.print(format, args);
+        }
     };
 }
 
-fn indentingWriter(comptime width: u32, underlying_stream: anytype) IndentingWriter(width, @TypeOf(underlying_stream)) {
+pub fn indentingWriter(comptime width: u32, underlying_stream: anytype) IndentingWriter(width, @TypeOf(underlying_stream)) {
     return .{ .depth = 0, .underlying_writer = underlying_stream, .needs_indent = false };
 }
