@@ -279,10 +279,14 @@ pub fn values(self: *const Air, ids: Air.Values) []const Value {
     return @ptrCast(self.extra[start..end]);
 }
 
-pub fn typeOf(self: *const Air, value: Value) InternPool.Index {
-    std.debug.assert(value.tag == .index);
+pub fn typeOf(self: *const Air, pool: *const InternPool, value: Value) InternPool.Index {
+    return switch (value.tag) {
+        .index => self.typeOfIndex(pool, value.payload.index),
+        .ip => self.typeOfInterned(pool, value.payload.ip),
+    };
+}
 
-    const index = value.payload.index;
+fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) InternPool.Index {
     return switch (self.get(index)) {
         .null => unreachable,
         .ident => |ident| ident.type,
@@ -292,26 +296,16 @@ pub fn typeOf(self: *const Air, value: Value) InternPool.Index {
         // coercing it to a specific type
         .bundle_literal => |literal| literal.type,
         // TODO: should fields know their bundle type?
-        .field_init => |fld| self.typeOf(fld),
+        .field_init => |fld| self.typeOf(pool, fld),
         .array_literal => |literal| literal.type,
         .module_literal => |literal| literal.type,
         .input_init => |input| input.type,
-        .ineg => |v| self.typeOf(v),
-        .bnot => |v| self.typeOf(v),
+        .ineg => |v| self.typeOf(pool, v),
+        .bnot => |v| self.typeOf(pool, v),
         .lnot => .bool,
-        .paren => |v| self.typeOf(v),
-        .band, .bor, .bxor => |v| self.typeOf(v.l),
+        .paren => |v| self.typeOf(pool, v),
+        .band, .bor, .bxor => |v| self.typeOf(pool, v.l),
         inline .iadd, .isub => |pl| pl.type,
-        //     .iadd => |v| ty: {
-        //         const src = self.pool.get(self.typeOf(v.l)).ty;
-        //         const dst: Type = switch (src) {
-        //             .uint => |bits| .{ .uint = bits + 1 },
-        //             // FIXME: implement
-        //             .sint => unreachable,
-        //             else => unreachable,
-        //         };
-        // break :ty try self.pool.put(.{ .ty = dst });
-        //     },
         .land,
         .lor,
         .lxor,
@@ -322,7 +316,12 @@ pub fn typeOf(self: *const Air, value: Value) InternPool.Index {
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,
         .decl => |signal| self.extraData(signal, Air.Node.Signal).type,
         .param => |param| param.type,
-        .yield => |v| self.typeOf(v),
+        .yield => |v| self.typeOf(pool, v),
         .block, .toplevel => unreachable,
     };
+}
+
+fn typeOfInterned(_: *const Air, pool: *const InternPool, index: InternPool.Index) InternPool.Index {
+    const tv = pool.get(index).tv;
+    return tv.ty;
 }

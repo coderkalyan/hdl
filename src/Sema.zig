@@ -3,6 +3,7 @@ const Cst = @import("Cst.zig");
 const Air = @import("Air.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("type.zig").Type;
+const TypedValue = @import("value.zig").TypedValue;
 const Package = @import("Package.zig");
 const error_handler = @import("error_handler.zig");
 
@@ -136,20 +137,55 @@ const Sema = struct {
         body,
     };
 
-    pub const Context = struct {
-        /// The expression being evaluated should attempt to coerce
-        /// into this type, or error otherwise. If no type hint is
-        /// specified, this is `null` and the expression should infer
-        /// the type.
-        type: InternPool.Index,
-        /// The declaration (type or function) being evaluated should
+    pub const ResultInfo = struct {
+        /// Defines the context in which an expression is being evaluated.
+        /// This includes information about type coercion, compile time vs
+        /// elaboration time semantics, and whether or not to discard.
+        ctx: Context,
+        /// The expression (type or value) being evaluated should
         /// adopt this name. If no name hint is specified, this is
-        /// `null` and the declaration is anonymous.
-        name: InternPool.Index,
-        /// The Decl that this expression is being assigned to.
-        // decl: ?*Decl = null,
+        /// `null` and the expression is anonymous and may autogenerate.
+        /// a name if one is necessary as a salt (i.e. bundle types).
+        name: InternPool.Index = .null,
 
-        pub const anon_type: Context = .{ .type = .null, .name = .null };
+        pub const Context = union(enum) {
+            /// The expression will be discarded. Only side effects
+            /// need be elaborated.
+            discard,
+            /// The expression will be elaborated into a signal of
+            /// inferred type.
+            def_inferred,
+            /// The expression will be elaborated into a signal of
+            /// declared type, and must coerce into that type or error.
+            def_type: InternPool.Index,
+            /// The expression will be evaluated as a type.
+            type,
+            /// The expression must be eagerly evaluated in a compile time
+            /// context and may use compile time only types. The type of
+            /// the expression is inferred.
+            const_inferred,
+            /// The expression must be eagerly evaluated in a compile time
+            /// context and may use compile time only types. The expression
+            /// must coerce into the specified type or error.
+            const_type: InternPool.Index,
+        };
+
+        pub const discard: ResultInfo = .{
+            .ctx = .{ .discard = {} },
+            .name = .null,
+        };
+
+        pub fn ty(name: InternPool.Index) ResultInfo {
+            return .{
+                .ctx = .{ .type = {} },
+                .name = name,
+            };
+        }
+
+        pub fn val(type_hint: ?InternPool.Index) ResultInfo {
+            if (type_hint) |t| return .{ .ctx = .{ .def_type = t }, .name = .null };
+            return .{ .ctx = .{ .def_inferred = {} }, .name = .null };
+        }
     };
 
     pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, signature: InternPool.Index, scope: ScopeKind) !Sema {
@@ -221,7 +257,7 @@ const Sema = struct {
         return self.pool.put(.{ .str = str });
     }
 
-    pub fn addIndices(self: *Sema, ids: []const Index) !Air.Indices {
+    fn addIndices(self: *Sema, ids: []const Index) !Air.Indices {
         const start: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(self.gpa, @ptrCast(ids));
         const end: u32 = @intCast(self.extra.items.len);
@@ -232,7 +268,7 @@ const Sema = struct {
         });
     }
 
-    pub fn addValues(self: *Sema, ids: []const Value) !Air.Values {
+    fn addValues(self: *Sema, ids: []const Value) !Air.Values {
         const start: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(self.gpa, @ptrCast(ids));
         const end: u32 = @intCast(self.extra.items.len);
@@ -243,12 +279,16 @@ const Sema = struct {
         });
     }
 
-    pub fn putType(self: *Sema, ty: Type) !InternPool.Index {
+    fn putType(self: *Sema, ty: Type) !InternPool.Index {
         return self.pool.put(.{ .ty = ty });
     }
 
-    pub fn addError(self: *Sema, tag: SourceError.Tag, token: Cst.TokenIndex) !void {
+    fn addError(self: *Sema, tag: SourceError.Tag, token: Cst.TokenIndex) !void {
         try self.errors.append(self.arena, .{ .tag = tag, .token = token });
+    }
+
+    fn typeOf(self: *Sema, value: Value) InternPool.Index {
+        return self.tempAir().typeOf(self.pool, value);
     }
 
     // no Airs are generated here, but the InternPool is populated with
@@ -326,17 +366,20 @@ const Sema = struct {
         const ty, const value = if (data.type == .null) tv: {
             // Type inference, so first evaluate the value, and then
             // determine its type and define the signal to that type.
-            const ctx: Context = .{ .type = .null, .name = name };
-            const value = try self.expression(s, data.value, &ctx);
-            const ty = self.tempAir().typeOf(value);
+            const ri: ResultInfo = .ty(.null);
+            const value = try self.expression(s, data.value, ri);
+            const ty = self.tempAir().typeOf(self.pool, value);
             break :tv .{ ty, value };
         } else tv: {
             // Otherwise, first evaluate the type, and then use it in the
             // result context for the value (i.e. to evaluate anonymous
             // literals).
-            const ty = try self.type(data.type, &.anon_type);
-            const ctx: Context = .{ .type = ty, .name = name };
-            const value = try self.expression(s, data.value, &ctx);
+            const ty = try self.type(data.type, .ty(.null));
+            const ri: ResultInfo = .{
+                .ctx = .{ .def_type = ty },
+                .name = name,
+            };
+            const value = try self.expression(s, data.value, ri);
             break :tv .{ ty, value };
         };
 
@@ -366,8 +409,11 @@ const Sema = struct {
         const data = self.cst.payload(index).yield;
 
         const signature = self.pool.get(self.signature).ty.signature;
-        const ctx: Context = .{ .type = signature.output_type, .name = .null };
-        const value = try self.expression(s, data, &ctx);
+        const ri: ResultInfo = .{
+            .ctx = .{ .def_type = signature.output_type },
+            .name = .null,
+        };
+        const value = try self.expression(s, data, ri);
         return self.addNode(.{ .yield = value });
     }
 
@@ -376,8 +422,8 @@ const Sema = struct {
         const ident_token = self.cst.mainToken(index).advance(1);
         const name = try self.internToken(ident_token);
 
-        const ctx: Context = .{ .type = .null, .name = name };
-        const ty = try self.type(data, &ctx);
+        const ri: ResultInfo = .ty(name);
+        const ty = try self.type(data, ri);
 
         const decl = try self.pool.createDecl(.{
             .kind = .type,
@@ -389,13 +435,13 @@ const Sema = struct {
         return decl;
     }
 
-    fn @"type"(self: *Sema, index: Cst.Index, ctx: *const Context) Error!InternPool.Index {
+    fn @"type"(self: *Sema, index: Cst.Index, ri: ResultInfo) Error!InternPool.Index {
         const data = self.cst.payload(index);
 
         return switch (data) {
             .ident => self.identType(index),
-            .bundle => self.bundle(index, ctx),
-            .module => self.module(index, ctx),
+            .bundle => self.bundle(index, ri),
+            .module => self.module(index, ri),
             else => unimplemented(),
         };
     }
@@ -449,7 +495,7 @@ const Sema = struct {
         return self.pool.put(.{ .ty = ty });
     }
 
-    fn bundle(self: *Sema, index: Cst.Index, ctx: *const Context) !InternPool.Index {
+    fn bundle(self: *Sema, index: Cst.Index, ri: ResultInfo) !InternPool.Index {
         const data = self.cst.payload(index).bundle;
         const items = self.cst.indices(data);
 
@@ -462,14 +508,14 @@ const Sema = struct {
             const field = self.cst.payload(idx).field;
             const token = self.cst.mainToken(idx);
             name.* = try self.internToken(token);
-            ty.* = try self.type(field, &.anon_type);
+            ty.* = try self.type(field, .ty(.null));
         }
 
         return self.pool.put(.{
             .ty = .{
                 .bundle = .{
                     .cst_index = index,
-                    .name = ctx.name,
+                    .name = ri.name,
                     .field_names = names,
                     .field_types = types,
                 },
@@ -477,19 +523,85 @@ const Sema = struct {
         });
     }
 
-    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ctx: *const Context) Error!Value {
+    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ri: ResultInfo) Error!Value {
         const data = self.cst.payload(index);
 
         return switch (data) {
-            .ident => self.identExpression(s, ctx, index),
-            .unary => self.unary(s, ctx, index),
-            .binary => self.binary(s, ctx, index),
-            .bundle_literal => self.bundleLiteral(s, ctx, index),
+            .bool => self.bool(s, ri, index),
+            .integer => self.integer(s, ri, index),
+            .ident => self.identExpression(s, ri, index),
+            .unary => self.unary(s, ri, index),
+            .binary => self.binary(s, ri, index),
+            .bundle_literal => self.bundleLiteral(s, ri, index),
             else => unimplemented(),
         };
     }
 
-    fn identExpression(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
+    fn @"bool"(self: *Sema, _: *Scope, _: ResultInfo, index: Cst.Index) !Value {
+        const token = self.cst.mainToken(index);
+        const tag = self.cst.tokenTag(token);
+        return switch (tag) {
+            .k_true => Value.ip(.btrue),
+            .k_false => Value.ip(.bfalse),
+            else => unreachable,
+        };
+    }
+
+    fn integer(self: *Sema, _: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const token = self.cst.mainToken(index);
+        const str = self.cst.tokenString(token);
+        std.debug.assert(str.len > 0);
+
+        const value = try std.fmt.parseInt(i64, str, 0);
+
+        return switch (ri.ctx) {
+            .discard => unimplemented(),
+            // If the expression does not have a type hint in an elaboration
+            // context, it is a compiler error.
+            // NOTE: While it would be trivial to implement semantics that
+            // guess a "safe" bitwidth and type to elaborate the literal, this
+            // would be of limited use because the resulting type does not
+            // easily coerce for use in an expression downstream.
+            // FIXME: compiler error
+            .def_inferred => unimplemented(),
+            // If the expression has a type hint, try to coerce the integer
+            // to that type by checking that the value can be represented
+            // losslessly.
+            // NOTE: Integers should never be of `.int` (compile time int)
+            // type in this context, compile time expressions use the
+            // `.const` context.
+            .def_type => |hint| val: {
+                const ty = self.pool.get(hint).ty;
+                std.debug.assert((ty == .uint) or (ty == .sint));
+                // FIXME: actually check if coercion is legal properly
+                if (ty == .uint) std.debug.assert(value >= 0);
+
+                const tv: TypedValue = .{ .ty = hint, .val = .{ .int = value } };
+                const ip = try self.pool.put(.{ .tv = tv });
+                break :val Value.ip(ip);
+            },
+            .type => unreachable,
+            // When inferring the type in a comptime context, the integer
+            // is not coerced into any concrete type.
+            .const_inferred => val: {
+                const tv: TypedValue = .{ .ty = .int, .val = .{ .int = value } };
+                const ip = try self.pool.put(.{ .tv = tv });
+                break :val Value.ip(ip);
+            },
+            // When a type hint is provided in a comptime context, try to
+            // coerce the integer to that type similar to `.def_type`
+            .const_type => |hint| val: {
+                const ty = self.pool.get(hint).ty;
+                // TODO: implement comptime manipulation of runtime types
+                std.debug.assert(ty == .int);
+                const tv: TypedValue = .{ .ty = hint, .val = .{ .int = value } };
+                const ip = try self.pool.put(.{ .tv = tv });
+                break :val Value.ip(ip);
+            },
+        };
+    }
+
+    fn identExpression(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const token = self.cst.mainToken(index);
         const ident = try self.internToken(token);
 
@@ -507,8 +619,8 @@ const Sema = struct {
 
         // If a type hint is provided in the context, validate it
         // against the type of the signal that was resolved.
-        const ty = self.tempAir().typeOf(Value.index(signal));
-        if (ctx.type != .null and ctx.type != ty) {
+        const ty = self.typeOf(Value.index(signal));
+        if (ri.ctx == .def_type and ri.ctx.def_type != ty) {
             try self.addError(.type_coerce_fail, token);
             return error.SourceError;
         }
@@ -522,15 +634,15 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn unary(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
+    fn unary(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).unary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const inner = try self.expression(s, data, ctx);
+        const inner = try self.expression(s, data, ri);
 
         // check that the expression type is compatible with the operator
-        const ty = self.tempAir().typeOf(inner);
+        const ty = self.typeOf(inner);
         const dty = self.pool.get(ty).ty;
         const valid = switch (operator) {
             // TODO: is this correct, what does negating unsigned mean?
@@ -556,22 +668,22 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn binary(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
+    fn binary(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).binary;
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const inner_ctx: *const Context = switch (operator) {
-            .k_and, .k_or, .k_xor, .k_implies => &.{ .type = .bool, .name = ctx.name },
-            else => &.{ .type = .null, .name = ctx.name },
+        const inner_ri: ResultInfo = switch (operator) {
+            .k_and, .k_or, .k_xor, .k_implies => .val(.bool),
+            else => .val(null),
         };
 
-        const l = try self.expression(s, data.l, inner_ctx);
-        const r = try self.expression(s, data.r, inner_ctx);
+        const l = try self.expression(s, data.l, inner_ri);
+        const r = try self.expression(s, data.r, inner_ri);
 
         // check that both expressions have the same type
-        const lty = self.tempAir().typeOf(l);
-        const rty = self.tempAir().typeOf(r);
+        const lty = self.typeOf(l);
+        const rty = self.typeOf(r);
         if (lty != rty) {
             try self.addError(.type_binary_diff, main_token);
             return error.SourceError;
@@ -616,7 +728,7 @@ const Sema = struct {
 
         // If a type hint is provided in the context, validate it
         // against the type of the signal that was resolved.
-        if (ctx.type != .null and ctx.type != dty) {
+        if (ri.ctx == .def_type and ri.ctx.def_type != dty) {
             try self.addError(.type_coerce_fail, main_token);
             return error.SourceError;
         }
@@ -644,19 +756,19 @@ const Sema = struct {
         return Value.index(try self.addNode(node));
     }
 
-    fn bundleLiteral(self: *Sema, s: *Scope, ctx: *const Context, index: Cst.Index) !Value {
+    fn bundleLiteral(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).bundle_literal;
         const inits = self.cst.indices(data.inits);
 
         const bundle_type = if (data.type != .null) type: {
             // if explicitly specified, no need to infer from context
-            const ty = try self.type(data.type, &.anon_type);
+            const ty = try self.type(data.type, .ty(.null));
             break :type ty;
         } else type: {
             // otherwise use the context
             // FIXME: if this is null it is a compiler error
-            const inferred = ctx.type;
-            std.debug.assert(inferred != .null);
+            // for definitions and perfectly fine for consts
+            const inferred = ri.ctx.def_type;
             break :type inferred;
         };
 
@@ -686,7 +798,7 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn module(self: *Sema, index: Cst.Index, ctx: *const Context) !InternPool.Index {
+    fn module(self: *Sema, index: Cst.Index, ri: ResultInfo) !InternPool.Index {
         const data = self.cst.payload(index).module;
         const ports = self.cst.payload(data.ports).ports;
         const inputs = self.cst.indices(ports.inputs);
@@ -700,13 +812,13 @@ const Sema = struct {
             const input = self.cst.payload(idx).input;
             const token = self.cst.mainToken(idx);
             const name = try self.internToken(token);
-            const ty = try self.type(input, &.anon_type);
+            const ty = try self.type(input, .ty(.null));
 
             input_names[i] = name;
             input_types[i] = ty;
         }
 
-        const output_type = try self.type(ports.output, &.anon_type);
+        const output_type = try self.type(ports.output, .ty(.null));
         const signature = try self.putType(.{
             .signature = .{
                 .input_names = input_names,
@@ -714,16 +826,6 @@ const Sema = struct {
                 .output_type = output_type,
             },
         });
-
-        // const signature: Type = .{
-        //     .module = .{
-        //         .cst_index = index,
-        //         .name = ctx.name,
-        //         .input_names = input_names,
-        //         .input_types = input_types,
-        //         .output_type = output_type,
-        //     },
-        // };
 
         var sema = try Sema.init(self.gpa, self.arena, self.pool, self.cst, signature, .body);
         errdefer sema.deinit();
@@ -772,7 +874,7 @@ const Sema = struct {
         const module_type = try self.putType(.{
             .module = .{
                 .cst_index = index,
-                .name = ctx.name,
+                .name = ri.name,
                 .signature = signature,
                 .air = air_index,
             },

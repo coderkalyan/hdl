@@ -119,6 +119,7 @@ pub const Item = struct {
         signature_ty,
         module_ty,
         int_tv,
+        bool_tv,
         str,
         // air,
         // decl,
@@ -174,6 +175,12 @@ pub const Item = struct {
         air: AirIndex,
     };
 
+    /// Unpacks to `TypedValue.Int`
+    pub const Int = struct {
+        ty: Index,
+        wide: WideIndex,
+    };
+
     pub const ExtraSlice = struct {
         start: ExtraIndex,
         end: ExtraIndex,
@@ -192,6 +199,8 @@ pub const Index = enum(u31) {
     /// Common values.
     izero,
     ione,
+    btrue,
+    bfalse,
     /// Common strings.
     builtin_out,
 
@@ -238,6 +247,8 @@ const static_keys = [_]Key{
     .{ .ty = Type.common.bool },
     .{ .tv = TypedValue.common.izero },
     .{ .tv = TypedValue.common.ione },
+    .{ .tv = TypedValue.common.true },
+    .{ .tv = TypedValue.common.false },
     .{ .str = "out" },
 };
 
@@ -356,6 +367,7 @@ pub fn get(pool: *const InternPool, _index: Index) Key {
         .module_ty,
         => .{ .ty = Type.deserialize(item, pool) },
         .int_tv,
+        .bool_tv,
         => .{ .tv = TypedValue.deserialize(item, pool) },
         .str => .{ .str = pool.getString(item) },
         // .air => .{ .air = item.payload.air },

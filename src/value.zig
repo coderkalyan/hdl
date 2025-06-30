@@ -6,7 +6,7 @@ const Item = InternPool.Item;
 
 pub const Value = union(enum) {
     int: i64,
-    // bool: bool,
+    bool: bool,
 
     pub const Tag = std.meta.Tag(Value);
 };
@@ -22,13 +22,20 @@ pub const TypedValue = struct {
         const val = tv.val;
 
         return switch (val) {
-            // because ints have a "known" type, there's no need to store it
-            .int => |int| {
+            .int => |int| item: {
                 const wide_top: u32 = @intCast(pool.wide.items.len);
                 try pool.wide.append(pool.gpa, int);
-                return .{ .tag = .int_tv, .payload = .{ .wide = @enumFromInt(wide_top) } };
+                const extra = try pool.addExtra(Item.Int{
+                    .ty = tv.ty,
+                    .wide = @enumFromInt(wide_top),
+                });
+
+                break :item .{
+                    .tag = .int_tv,
+                    .payload = .{ .extra = extra },
+                };
             },
-            // .bool => |b| .{ .tag = .bool_tv, .payload = .{ .bool = b } },
+            .bool => |b| .{ .tag = .bool_tv, .payload = .{ .bool = b } },
         };
     }
 
@@ -37,15 +44,14 @@ pub const TypedValue = struct {
     pub fn deserialize(item: Item, pool: *const InternPool) TypedValue {
         const tag = item.tag;
         const payload = item.payload;
-        _ = payload;
-        _ = pool;
 
         return switch (tag) {
-            // .int_tv => {
-            //     const int = pool.wide.items[@intFromEnum(payload.wide)];
-            //     return .{ .ty = .int, .val = .{ .int = int } };
-            // },
-            // .bool_tv => .{ .ty = .bool, .val = .{ .bool = payload.bool } },
+            .int_tv => {
+                const int = pool.extraData(payload.extra, Item.Int);
+                const val = pool.wide.items[@intFromEnum(int.wide)];
+                return .{ .ty = int.ty, .val = .{ .int = val } };
+            },
+            .bool_tv => .{ .ty = .bool, .val = .{ .bool = payload.bool } },
             else => unreachable,
         };
     }
@@ -68,7 +74,7 @@ pub const TypedValue = struct {
     pub const common = struct {
         pub const izero: TypedValue = .{ .ty = .int, .val = .{ .int = 0 } };
         pub const ione: TypedValue = .{ .ty = .int, .val = .{ .int = 1 } };
-        // pub const @"true": TypedValue = .{ .ty = .bool, .val = .{ .bool = true } };
-        // pub const @"false": TypedValue = .{ .ty = .bool, .val = .{ .bool = false } };
+        pub const @"true": TypedValue = .{ .ty = .bool, .val = .{ .bool = true } };
+        pub const @"false": TypedValue = .{ .ty = .bool, .val = .{ .bool = false } };
     };
 };

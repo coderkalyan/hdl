@@ -77,7 +77,17 @@ fn CodeGen(WriterType: type) type {
                 if (stack.len == 0) return null;
 
                 const frame = &stack[stack.len - 1];
-                std.debug.assert(frame.value.tag == .index); // FIXME
+                if (frame.value.tag == .ip) {
+                    // FIXME: this will completely break for interned
+                    // bundle literals when those are added
+                    if (frame.ptr == 0) {
+                        frame.ptr += 1;
+                        return frame.value;
+                    } else {
+                        return null;
+                    }
+                }
+
                 const index = frame.value.payload.index;
                 const items = switch (self.air.get(index)) {
                     .bundle_literal => |bundle| self.air.values(bundle.inits),
@@ -140,8 +150,10 @@ fn CodeGen(WriterType: type) type {
                 for (stack, 0..) |*frame, i| {
                     const name = self.cg.pool.get(frame.name).str;
                     try bytes.ensureUnusedCapacity(self.cg.arena, name.len + 1);
-                    bytes.appendSliceAssumeCapacity(name);
-                    if (i < stack.len - 1) bytes.appendAssumeCapacity('_');
+                    try bytes.appendSlice(self.cg.arena, name);
+                    // bytes.appendSliceAssumeCapacity(name);
+                    // if (i < stack.len - 1) bytes.appendAssumeCapacity('_');
+                    if (i < stack.len - 1) try bytes.append(self.cg.arena, '_');
                 }
 
                 const frame = &stack[stack.len - 1];
@@ -156,8 +168,10 @@ fn CodeGen(WriterType: type) type {
 
                             const str = self.cg.pool.get(name).str;
                             try bytes.ensureUnusedCapacity(self.cg.arena, str.len + 1);
-                            bytes.appendAssumeCapacity('_');
-                            bytes.appendSliceAssumeCapacity(str);
+                            // bytes.appendAssumeCapacity('_');
+                            // bytes.appendSliceAssumeCapacity(str);
+                            try bytes.append(self.cg.arena, '_');
+                            try bytes.appendSlice(self.cg.arena, str);
 
                             return .{
                                 .name = bytes.items[bytes_top..],
@@ -170,6 +184,7 @@ fn CodeGen(WriterType: type) type {
                     },
                     .module => unreachable,
                     else => {
+                        // std.debug.print("name: '{s}'\n", .{bytes.items[bytes_top..]});
                         _ = self.stack.pop();
                         return .{
                             .name = bytes.items[bytes_top..],
@@ -179,6 +194,10 @@ fn CodeGen(WriterType: type) type {
                 }
             }
         };
+
+        fn typeOf(self: *Self, value: Value) InternPool.Index {
+            return self.air.typeOf(self.pool, value);
+        }
 
         pub fn block(self: *Self, index: Index) !void {
             const data = self.air.get(index).block;
@@ -202,7 +221,7 @@ fn CodeGen(WriterType: type) type {
         fn def(self: *Self, index: Index) !void {
             const data = self.air.get(index).def;
             const signal = self.air.extraData(data.signal, Node.Signal);
-            std.debug.assert(signal.type == self.air.typeOf(data.value));
+            std.debug.assert(signal.type == self.typeOf(data.value));
 
             var targets = try self.iterateTarget(signal.name, signal.type);
             var exprs = try self.iterateExpression(data.value);
@@ -214,9 +233,16 @@ fn CodeGen(WriterType: type) type {
                     break;
                 }
 
-                const datatype = try self.type(target.?.type);
-                const name = target.?.name;
-                const expr = try self.formatExpression(value.?);
+                // std.debug.print("target: '{s}'\n", .{target.?.name});
+                const datatype_tmp = try self.type(target.?.type);
+                const datatype = try self.arena.alloc(u8, datatype_tmp.len);
+                @memcpy(datatype, datatype_tmp);
+                const name_tmp = target.?.name;
+                const name = try self.arena.alloc(u8, name_tmp.len);
+                @memcpy(name, name_tmp);
+                const expr_tmp = try self.formatExpression(value.?);
+                const expr = try self.arena.alloc(u8, expr_tmp.len);
+                @memcpy(expr, expr_tmp);
                 try self.writer.print("wire", .{});
                 if (datatype.len > 0) {
                     try self.writer.print(" {s}", .{datatype});
@@ -228,11 +254,12 @@ fn CodeGen(WriterType: type) type {
                 try self.writer.print(" = {s};", .{expr});
                 try self.writer.newline();
             }
+            // std.debug.print("\n", .{});
         }
 
         fn yield(self: *Self, index: Index) !void {
             const data = self.air.get(index).yield;
-            const ty = self.air.typeOf(data);
+            const ty = self.typeOf(data);
             var targets = try self.iterateTarget(.builtin_out, ty);
             var exprs = try self.iterateExpression(data);
             while (true) {
@@ -279,12 +306,15 @@ fn CodeGen(WriterType: type) type {
         }
 
         fn expression(self: *Self, value: Value) Error!void {
-            // TODO: implement interned values
-            std.debug.assert(value.tag == .index);
-            const index = value.payload.index;
+            return switch (value.tag) {
+                .index => self.expressionIndex(value.payload.index),
+                .ip => self.expressionInterned(value.payload.ip),
+            };
+        }
 
-            // const tag = self.air.tag(index);
-            switch (self.air.get(index)) {
+        fn expressionIndex(self: *Self, index: Index) Error!void {
+            const tag = self.air.tag(index);
+            switch (tag) {
                 .null => unreachable,
                 .ident => try self.ident(index),
                 // do not call expression() directly on aggregate
@@ -309,9 +339,40 @@ fn CodeGen(WriterType: type) type {
                 .block,
                 .toplevel,
                 => unreachable,
-                // TODO: unimplemented
-                else => unreachable,
+                else => unimplemented(),
             }
+        }
+
+        fn expressionInterned(self: *Self, index: InternPool.Index) !void {
+            const tv = self.pool.get(index).tv;
+            const ty = self.pool.get(tv.ty).ty;
+            switch (ty) {
+                .bool => try self.bool(index),
+                .uint, .sint => try self.int(index),
+                .int => unreachable,
+                else => unimplemented(),
+            }
+        }
+
+        fn @"bool"(self: *Self, index: InternPool.Index) !void {
+            const tv = self.pool.get(index).tv;
+            std.debug.assert(tv.ty == .bool);
+
+            switch (tv.val.bool) {
+                true => try self.bytes.appendSlice(self.arena, "1'b1"),
+                false => try self.bytes.appendSlice(self.arena, "1'b0"),
+            }
+        }
+
+        fn int(self: *Self, index: InternPool.Index) !void {
+            const tv = self.pool.get(index).tv;
+            const ty = self.pool.get(tv.ty).ty;
+            std.debug.assert((ty == .uint) or (ty == .sint));
+            if (ty == .sint) unimplemented();
+
+            const writer = self.bytes.writer(self.arena);
+            // TODO: choose the base for the format intelligently
+            try writer.print("{}'b{b}", .{ ty.uint, tv.val.int });
         }
 
         fn ident(self: *Self, index: Index) !void {
@@ -340,7 +401,7 @@ fn CodeGen(WriterType: type) type {
         }
 
         fn bundleLiteral(self: *Self, index: Index) !void {
-            const ty = self.air.typeOf(Value.index(index));
+            const ty = self.typeOf(Value.index(index));
             std.debug.assert(self.pool.get(ty).ty == .bundle);
 
             const data = self.air.get(index).bundle_literal;
@@ -352,7 +413,7 @@ fn CodeGen(WriterType: type) type {
         }
 
         fn ineg(self: *Self, index: Index) !void {
-            const ty = self.air.typeOf(Value.index(index));
+            const ty = self.typeOf(Value.index(index));
             std.debug.assert(self.pool.get(ty).ty == .sint);
 
             const data = self.air.get(index).ineg;
@@ -362,7 +423,7 @@ fn CodeGen(WriterType: type) type {
 
         fn bnot(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint) or (ty == .bits));
@@ -373,7 +434,7 @@ fn CodeGen(WriterType: type) type {
         }
 
         fn lnot(self: *Self, index: Index) !void {
-            const ty = self.air.typeOf(Value.index(index));
+            const ty = self.typeOf(Value.index(index));
             std.debug.assert(self.pool.get(ty).ty == .bool);
 
             const data = self.air.get(index).lnot;
@@ -390,7 +451,7 @@ fn CodeGen(WriterType: type) type {
 
         fn band(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint) or (ty == .bits));
@@ -403,7 +464,7 @@ fn CodeGen(WriterType: type) type {
 
         fn bor(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint) or (ty == .bits));
@@ -416,7 +477,7 @@ fn CodeGen(WriterType: type) type {
 
         fn bxor(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint) or (ty == .bits));
@@ -429,7 +490,7 @@ fn CodeGen(WriterType: type) type {
 
         fn land(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert(ty == .bool);
@@ -442,7 +503,7 @@ fn CodeGen(WriterType: type) type {
 
         fn lor(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert(ty == .bool);
@@ -455,7 +516,7 @@ fn CodeGen(WriterType: type) type {
 
         fn lxor(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert(ty == .bool);
@@ -468,7 +529,7 @@ fn CodeGen(WriterType: type) type {
 
         fn limplies(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert(ty == .bool);
@@ -483,7 +544,7 @@ fn CodeGen(WriterType: type) type {
 
         fn iadd(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint));
@@ -497,7 +558,7 @@ fn CodeGen(WriterType: type) type {
 
         fn isub(self: *Self, index: Index) !void {
             const ty = type: {
-                const ip = self.air.typeOf(Value.index(index));
+                const ip = self.typeOf(Value.index(index));
                 break :type self.pool.get(ip).ty;
             };
             std.debug.assert((ty == .sint) or (ty == .uint));
