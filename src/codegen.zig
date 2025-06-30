@@ -333,6 +333,8 @@ fn CodeGen(WriterType: type) type {
                 .lor => try self.lor(index),
                 .lxor => try self.lxor(index),
                 .limplies => try self.limplies(index),
+                .bit => try self.bit(index),
+                .bitslice => try self.bitslice(index),
                 .def,
                 .decl,
                 .yield,
@@ -348,8 +350,7 @@ fn CodeGen(WriterType: type) type {
             const ty = self.pool.get(tv.ty).ty;
             switch (ty) {
                 .bool => try self.bool(index),
-                .uint, .sint => try self.int(index),
-                .int => unreachable,
+                .uint, .sint, .int => try self.int(index),
                 else => unimplemented(),
             }
         }
@@ -367,12 +368,14 @@ fn CodeGen(WriterType: type) type {
         fn int(self: *Self, index: InternPool.Index) !void {
             const tv = self.pool.get(index).tv;
             const ty = self.pool.get(tv.ty).ty;
-            std.debug.assert((ty == .uint) or (ty == .sint));
-            if (ty == .sint) unimplemented();
 
             const writer = self.bytes.writer(self.arena);
-            // TODO: choose the base for the format intelligently
-            try writer.print("{}'b{b}", .{ ty.uint, tv.val.int });
+            switch (ty) {
+                .int => try writer.print("{d}", .{tv.val.int}),
+                // TODO: choose the base for the format intelligently
+                .uint => try writer.print("{}'b{b}", .{ ty.uint, tv.val.int }),
+                else => unreachable,
+            }
         }
 
         fn ident(self: *Self, index: Index) !void {
@@ -568,6 +571,35 @@ fn CodeGen(WriterType: type) type {
             try self.expression(bin.l);
             try self.bytes.appendSlice(self.arena, " - ");
             try self.expression(bin.r);
+        }
+
+        fn bit(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert((ty == .bits) or (ty == .uint) or (ty == .sint));
+
+            const data = self.air.get(index).bit;
+            try self.expression(data.operand);
+            try self.bytes.appendSlice(self.arena, "[");
+            try self.expression(data.index);
+            try self.bytes.appendSlice(self.arena, "]");
+        }
+
+        fn bitslice(self: *Self, index: Index) !void {
+            const ty = type: {
+                const ip = self.typeOf(Value.index(index));
+                break :type self.pool.get(ip).ty;
+            };
+            std.debug.assert((ty == .bits) or (ty == .uint) or (ty == .sint));
+
+            const data = self.air.get(index).bitslice;
+            const extra = self.air.extraData(data.bitslice, Node.BitSlice);
+            try self.expression(extra.operand);
+            const upper = self.pool.get(extra.upper).tv.val.int;
+            const lower = self.pool.get(extra.lower).tv.val.int;
+            try self.bytes.writer(self.arena).print("[{}:{}]", .{ upper - 1, lower });
         }
 
         fn preamble(self: *Self) !void {

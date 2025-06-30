@@ -196,6 +196,7 @@ pub const Index = enum(u31) {
     // Common types.
     int,
     bool,
+    b1,
     /// Common values.
     izero,
     ione,
@@ -245,6 +246,7 @@ const static_keys = [_]Key{
     .{ .placeholder = {} },
     .{ .ty = Type.common.int },
     .{ .ty = Type.common.bool },
+    .{ .ty = Type.common.b1 },
     .{ .tv = TypedValue.common.izero },
     .{ .tv = TypedValue.common.ione },
     .{ .tv = TypedValue.common.true },

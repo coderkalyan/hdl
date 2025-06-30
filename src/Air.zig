@@ -163,10 +163,25 @@ pub const Node = union(enum) {
     // logical implication
     limplies: Binary,
 
+    /// Extract a single bit from a bit vector or int.
+    bit: struct {
+        // expression node for the bit vector
+        operand: Value,
+        // expression node for the index
+        index: Value,
+    },
+    /// Extract multiple bits from a bit vector or int.
+    bitslice: struct {
+        /// Data about the slice operand and bounds.
+        bitslice: ExtraIndex,
+        /// Type of the resulting expression.
+        type: InternPool.Index,
+    },
+
     // subscript (array element access by index)
     subscript: struct {
         // expression node for the array
-        value: Value,
+        operand: Value,
         // expression node for the index
         index: Value,
     },
@@ -225,6 +240,12 @@ pub const Node = union(enum) {
         type: InternPool.Index,
         name: InternPool.Index,
         salt: u32,
+    };
+
+    pub const BitSlice = struct {
+        operand: Value,
+        upper: InternPool.Index,
+        lower: InternPool.Index,
     };
 
     pub const Tag = std.meta.Tag(Node);
@@ -311,6 +332,8 @@ fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) InternPo
         .lxor,
         .limplies,
         => .bool,
+        .bit => .b1,
+        .bitslice => |bitslice| bitslice.type,
         // FIXME: implement these two aggregate accessors
         .subscript, .member => unreachable,
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,

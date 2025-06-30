@@ -285,7 +285,7 @@ pub const Parser = struct {
             expr = switch (p.current()) {
                 // handles subscript and slice, since we can't
                 // yet look far enough to know which it is
-                // .l_bracket => try p.subscript(expr),
+                .l_bracket => try p.subscript(expr),
                 // .period => try p.attribute(expr),
                 .l_paren => try p.moduleLiteral(expr),
                 else => return expr,
@@ -582,6 +582,44 @@ pub const Parser = struct {
             .main_token = type_token,
             .payload = .{ .type = ty },
         });
+    }
+
+    fn subscript(p: *Parser, operand: Cst.Index) !Index {
+        const l_bracket_token = try p.expect(.l_bracket);
+        const index = try p.expression(.value);
+        if (p.current() == .period_period) {
+            const upper = index;
+            _ = p.eatCurrent();
+            const lower = try p.expression(.value);
+            _ = try p.expect(.r_bracket);
+
+            const bounds = try p.addExtra(Node.Bounds{
+                .upper = upper,
+                .lower = lower,
+            });
+
+            return p.addNode(.{
+                .main_token = l_bracket_token,
+                .payload = .{
+                    .slice = .{
+                        .operand = operand,
+                        .bounds = bounds,
+                    },
+                },
+            });
+        } else {
+            _ = try p.expect(.r_bracket);
+
+            return p.addNode(.{
+                .main_token = l_bracket_token,
+                .payload = .{
+                    .subscript = .{
+                        .operand = operand,
+                        .index = index,
+                    },
+                },
+            });
+        }
     }
 
     // fn tupleLiteral(p: *Parser) !Node.Index {

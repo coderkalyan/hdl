@@ -157,9 +157,16 @@ pub const Node = struct {
         // subscript (array element access by index)
         subscript: struct {
             // expression node for the array
-            value: Index,
+            operand: Index,
             // expression node for the index
             index: Index,
+        },
+        // slice (substring from bit vector by start/end indices)
+        slice: struct {
+            // expression node for the bit vector
+            operand: Index,
+            // expression nodes for the start and end indices
+            bounds: ExtraIndex,
         },
         // member (bundle field access by name)
         // main_token is the field name, and the index is the bundle expression
@@ -200,6 +207,11 @@ pub const Node = struct {
         // toplevel list of statements, similar to block
         // but can only hold type declarations and imports
         root: Indices,
+    };
+
+    pub const Bounds = struct {
+        upper: Index,
+        lower: Index,
     };
 };
 

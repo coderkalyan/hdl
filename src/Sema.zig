@@ -297,8 +297,8 @@ const Sema = struct {
         // the root forms a namespace with implicit forward declaration,
         // so a two pass approach is used
         const payload = self.cst.payload(self.cst.root);
-        const slice = self.cst.indices(payload.root);
-        for (slice) |cst_index| {
+        const sl = self.cst.indices(payload.root);
+        for (sl) |cst_index| {
             const decl = try self.typeDef(cst_index);
             _ = decl;
             // const ptr = self.pool.declPtr(decl);
@@ -319,13 +319,13 @@ const Sema = struct {
 
     fn block(self: *Sema, scope: *Scope, index: Cst.Index) !Index {
         const data = self.cst.payload(index).block;
-        const slice = self.cst.indices(data);
+        const sl = self.cst.indices(data);
         var s = scope;
 
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
-        try self.scratch.ensureUnusedCapacity(self.arena, slice.len);
-        for (slice) |i| {
+        try self.scratch.ensureUnusedCapacity(self.arena, sl.len);
+        for (sl) |i| {
             const ai, s = try self.statement(s, i);
             self.scratch.appendAssumeCapacity(@intFromEnum(ai));
         }
@@ -533,6 +533,8 @@ const Sema = struct {
             .unary => self.unary(s, ri, index),
             .binary => self.binary(s, ri, index),
             .bundle_literal => self.bundleLiteral(s, ri, index),
+            .subscript => self.subscript(s, ri, index),
+            .slice => self.slice(s, ri, index),
             else => unimplemented(),
         };
     }
@@ -673,13 +675,8 @@ const Sema = struct {
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const inner_ri: ResultInfo = switch (operator) {
-            .k_and, .k_or, .k_xor, .k_implies => .val(.bool),
-            else => .val(null),
-        };
-
-        const l = try self.expression(s, data.l, inner_ri);
-        const r = try self.expression(s, data.r, inner_ri);
+        const l = try self.expression(s, data.l, .val(null));
+        const r = try self.expression(s, data.r, .val(null));
 
         // check that both expressions have the same type
         const lty = self.typeOf(l);
@@ -793,6 +790,58 @@ const Sema = struct {
             .bundle_literal = .{
                 .type = bundle_type,
                 .inits = try self.addValues(values),
+            },
+        });
+        return Value.index(node);
+    }
+
+    fn subscript(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const data = self.cst.payload(index).subscript;
+        const operand = try self.expression(s, data.operand, ri);
+
+        const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
+        const idx = try self.expression(s, data.index, idx_ri);
+
+        const node = try self.addNode(.{
+            .bit = .{
+                .operand = operand,
+                .index = idx,
+            },
+        });
+        return Value.index(node);
+    }
+
+    fn slice(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const data = self.cst.payload(index).slice;
+        const bounds = self.cst.extraData(data.bounds, Cst.Node.Bounds);
+        const operand = try self.expression(s, data.operand, ri);
+        const oty = self.pool.get(self.typeOf(operand)).ty;
+        std.debug.assert((oty == .bits) or (oty == .uint) or (oty == .sint));
+
+        const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
+        const upper = try self.expression(s, bounds.upper, idx_ri);
+        const lower = try self.expression(s, bounds.lower, idx_ri);
+
+        std.debug.assert(upper.tag == .ip);
+        std.debug.assert(lower.tag == .ip);
+        const dty = ty: {
+            const end: u32 = @intCast(self.pool.get(upper.payload.ip).tv.val.int);
+            const start: u3 = @intCast(self.pool.get(lower.payload.ip).tv.val.int);
+            std.debug.assert(end >= start);
+            const len = end - start + 1;
+            break :ty try self.pool.put(.{ .ty = .{ .bits = len } });
+        };
+
+        const extra = try self.addExtra(Node.BitSlice{
+            .operand = operand,
+            .upper = upper.payload.ip,
+            .lower = lower.payload.ip,
+        });
+
+        const node = try self.addNode(.{
+            .bitslice = .{
+                .bitslice = extra,
+                .type = dty,
             },
         });
         return Value.index(node);
