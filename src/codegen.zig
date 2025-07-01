@@ -272,7 +272,8 @@ fn CodeGen(WriterType: type) type {
 
                 const name = target.?.name;
                 const expr = try self.formatExpression(value.?);
-                try self.writer.print("assign {s} = {s};\n", .{ name, expr });
+                try self.writer.print("assign {s} = {s};", .{ name, expr });
+                try self.writer.newline();
             }
         }
 

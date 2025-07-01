@@ -44,10 +44,17 @@ pub const Value = packed struct(u32) {
     }
 
     pub fn tagged(value: Value) Tagged {
-        switch (value.tag) {
-            .index => |i| .{ .index = i },
-            .ip => |i| .{ .ip = i },
-        }
+        return switch (value.tag) {
+            .index => .{ .index = value.payload.index },
+            .ip => .{ .ip = value.payload.ip },
+        };
+    }
+
+    pub fn asIndex(value: Value) ?Index {
+        return switch (value.tag) {
+            .index => value.payload.index,
+            .ip => null,
+        };
     }
 };
 
@@ -301,9 +308,9 @@ pub fn values(self: *const Air, ids: Air.Values) []const Value {
 }
 
 pub fn typeOf(self: *const Air, pool: *const InternPool, value: Value) InternPool.Index {
-    return switch (value.tag) {
-        .index => self.typeOfIndex(pool, value.payload.index),
-        .ip => self.typeOfInterned(pool, value.payload.ip),
+    return switch (value.tagged()) {
+        .index => |index| self.typeOfIndex(pool, index),
+        .ip => |ip| self.typeOfInterned(pool, ip),
     };
 }
 

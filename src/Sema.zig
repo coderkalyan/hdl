@@ -367,7 +367,7 @@ const Sema = struct {
             // Type inference, so first evaluate the value, and then
             // determine its type and define the signal to that type.
             const ri: ResultInfo = .ty(.null);
-            const value = try self.expression(s, data.value, ri);
+            const value = try self.expression(s, ri, data.value);
             const ty = self.tempAir().typeOf(self.pool, value);
             break :tv .{ ty, value };
         } else tv: {
@@ -379,7 +379,7 @@ const Sema = struct {
                 .ctx = .{ .def_type = ty },
                 .name = name,
             };
-            const value = try self.expression(s, data.value, ri);
+            const value = try self.expression(s, ri, data.value);
             break :tv .{ ty, value };
         };
 
@@ -409,11 +409,8 @@ const Sema = struct {
         const data = self.cst.payload(index).yield;
 
         const signature = self.pool.get(self.signature).ty.signature;
-        const ri: ResultInfo = .{
-            .ctx = .{ .def_type = signature.output_type },
-            .name = .null,
-        };
-        const value = try self.expression(s, data, ri);
+        const ri: ResultInfo = .val(signature.output_type);
+        const value = try self.expression(s, ri, data);
         return self.addNode(.{ .yield = value });
     }
 
@@ -422,9 +419,7 @@ const Sema = struct {
         const ident_token = self.cst.mainToken(index).advance(1);
         const name = try self.internToken(ident_token);
 
-        const ri: ResultInfo = .ty(name);
-        const ty = try self.type(data, ri);
-
+        const ty = try self.type(data, .ty(name));
         const decl = try self.pool.createDecl(.{
             .kind = .type,
             .name = name,
@@ -523,7 +518,7 @@ const Sema = struct {
         });
     }
 
-    fn expression(self: *Sema, s: *Scope, index: Cst.Index, ri: ResultInfo) Error!Value {
+    fn expression(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) Error!Value {
         const data = self.cst.payload(index);
 
         return switch (data) {
@@ -641,7 +636,7 @@ const Sema = struct {
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const inner = try self.expression(s, data, ri);
+        const inner = try self.expression(s, ri, data);
 
         // check that the expression type is compatible with the operator
         const ty = self.typeOf(inner);
@@ -675,8 +670,8 @@ const Sema = struct {
         const main_token = self.cst.mainToken(index);
         const operator = self.cst.tokenTag(main_token);
 
-        const l = try self.expression(s, data.l, .val(null));
-        const r = try self.expression(s, data.r, .val(null));
+        const l = try self.expression(s, .val(null), data.l);
+        const r = try self.expression(s, .val(null), data.r);
 
         // check that both expressions have the same type
         const lty = self.typeOf(l);
@@ -763,27 +758,58 @@ const Sema = struct {
             break :type ty;
         } else type: {
             // otherwise use the context
-            // FIXME: if this is null it is a compiler error
-            // for definitions and perfectly fine for consts
+            // TODO: add a comptime compound literal type and add support
+            // for the `.const_inferred` type here
             const inferred = ri.ctx.def_type;
             break :type inferred;
         };
 
-        const ty = self.pool.get(bundle_type).ty.bundle;
+        const ty = bundle: {
+            const ty = self.pool.get(bundle_type).ty;
+            switch (ty) {
+                .bundle => |val| break :bundle val,
+                else => {
+                    const main_token = self.cst.mainToken(index);
+                    try self.addError(.type_coerce_fail, main_token);
+                    return error.SourceError;
+                },
+            }
+        };
 
-        // TODO: actually validate the struct
         const scratch_top = self.scratch.items.len;
         defer self.scratch.shrinkRetainingCapacity(scratch_top);
         const values = try self.allocScratchSlice(Value, inits.len);
+        @memset(values, .index(.null));
+
         for (inits) |idx| {
             const field_init = self.cst.payload(idx).field_init;
             const main_token = self.cst.mainToken(idx);
             const init_name = try self.internToken(main_token);
-            const value = try self.expression(s, field_init, undefined);
-            const i = for (ty.field_names, 0..) |name, i| {
-                if (name == init_name) break i;
-            } else unreachable;
-            values[i] = value;
+            // Attempt to find the initializer name in the bundle fields,
+            // since it may be declared out of order. The underlying type
+            // defines the canonical order.
+            const names = ty.field_names;
+            const i = for (names, 0..) |name, i| {
+                if (name == init_name) {
+                    const v = values[i].asIndex();
+                    // If the slot has already been specified, this is a
+                    // duplicate field init, which is an error.
+                    if (v != .null) {
+                        try self.addError(.field_duplicate, main_token);
+                        return error.SourceError;
+                    } else {
+                        break i;
+                    }
+                }
+            } else {
+                // The field name was not found in the underlying type.
+                try self.addError(.field_unknown, main_token);
+                return error.SourceError;
+            };
+
+            const field_type = ty.field_types[i];
+            const field_ri: ResultInfo = .val(field_type);
+            values[i] = try self.expression(s, field_ri, field_init);
         }
 
         const node = try self.addNode(.{
@@ -797,10 +823,10 @@ const Sema = struct {
 
     fn subscript(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).subscript;
-        const operand = try self.expression(s, data.operand, ri);
+        const operand = try self.expression(s, ri, data.operand);
 
         const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
-        const idx = try self.expression(s, data.index, idx_ri);
+        const idx = try self.expression(s, idx_ri, data.index);
 
         const node = try self.addNode(.{
             .bit = .{
@@ -814,13 +840,13 @@ const Sema = struct {
     fn slice(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).slice;
         const bounds = self.cst.extraData(data.bounds, Cst.Node.Bounds);
-        const operand = try self.expression(s, data.operand, ri);
+        const operand = try self.expression(s, ri, data.operand);
         const oty = self.pool.get(self.typeOf(operand)).ty;
         std.debug.assert((oty == .bits) or (oty == .uint) or (oty == .sint));
 
         const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
-        const upper = try self.expression(s, bounds.upper, idx_ri);
-        const lower = try self.expression(s, bounds.lower, idx_ri);
+        const upper = try self.expression(s, idx_ri, bounds.upper);
+        const lower = try self.expression(s, idx_ri, bounds.lower);
 
         std.debug.assert(upper.tag == .ip);
         std.debug.assert(lower.tag == .ip);
@@ -828,7 +854,7 @@ const Sema = struct {
             const end: u32 = @intCast(self.pool.get(upper.payload.ip).tv.val.int);
             const start: u3 = @intCast(self.pool.get(lower.payload.ip).tv.val.int);
             std.debug.assert(end >= start);
-            const len = end - start + 1;
+            const len = end - start;
             break :ty try self.pool.put(.{ .ty = .{ .bits = len } });
         };
 
