@@ -314,7 +314,7 @@ pub fn typeOf(self: *const Air, pool: *const InternPool, value: Value) InternPoo
     };
 }
 
-fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) InternPool.Index {
+pub fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) InternPool.Index {
     return switch (self.get(index)) {
         .null => unreachable,
         .ident => |ident| ident.type,
@@ -351,7 +351,7 @@ fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) InternPo
     };
 }
 
-fn typeOfInterned(_: *const Air, pool: *const InternPool, index: InternPool.Index) InternPool.Index {
+pub fn typeOfInterned(_: *const Air, pool: *const InternPool, index: InternPool.Index) InternPool.Index {
     const tv = pool.get(index).tv;
     return tv.ty;
 }

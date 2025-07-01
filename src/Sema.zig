@@ -35,20 +35,6 @@ pub fn analyze(gpa: Allocator, pool: *InternPool, cst: *Cst) !void {
 
 // NOTE: in Zig 0.15 std.SinglyLinkedList is an intrusive list
 // so we can migrate to it
-// const Scope = struct {
-//     kind: Kind,
-//     // FIXME: because this map only contains named signals,
-//     // which are always defined (not anonymous expressions)
-//     // we should use Index here and not Value
-//     map: std.AutoHashMapUnmanaged(InternPool.Index, Value),
-//     parent: ?*Scope,
-//
-//     const Kind = enum {
-//         toplevel,
-//         body,
-//     };
-// };
-
 const Scope = struct {
     parent: ?*Scope,
     payload: Payload,
@@ -56,10 +42,10 @@ const Scope = struct {
     pub const Payload = union(enum) {
         /// Toplevel scope, does not contain anything.
         toplevel,
-        /// Namespace (for example toplevel package) with signal
+        /// Namespace (for example toplevel package) with const
         /// and type definitions. Names are unique within the
         /// namespace (no shadowing) and unordered.
-        namespace: std.AutoHashMapUnmanaged(InternPool.Index, Index),
+        namespace: std.AutoHashMapUnmanaged(InternPool.Index, InternPool.Index),
         /// A signal definition with name and value node.
         def: struct {
             name: InternPool.Index,
@@ -72,17 +58,31 @@ const Scope = struct {
             name: InternPool.Index,
             type: InternPool.Index,
         },
+        /// A constant definition with name and interned value.
+        @"const": struct {
+            name: InternPool.Index,
+            value: InternPool.Index,
+        },
+    };
+
+    pub const toplevel: Scope = .{
+        .parent = null,
+        .payload = .{ .toplevel = {} },
     };
 
     pub fn resolve(scope: *Scope, name: InternPool.Index) ?*Scope {
         var s = scope;
         while (true) {
+            // std.debug.print("{any}\n", .{s.*});
             switch (s.payload) {
                 .toplevel => return null,
-                inline .def, .type => |*pl| if (pl.name == name) return s,
+                inline .def,
+                .type,
+                .@"const",
+                => |*pl| if (pl.name == name) return s,
                 .decl => |pl| if (pl == name) return s,
-                .namespace => |*map| {
-                    if (map.contains(name)) return s;
+                .namespace => |*ns| {
+                    if (ns.contains(name)) return s;
                 },
             }
 
@@ -291,6 +291,14 @@ const Sema = struct {
         return self.tempAir().typeOf(self.pool, value);
     }
 
+    fn typeOfIndex(self: *Sema, index: Index) InternPool.Index {
+        return self.tempAir().typeOfIndex(self.pool, index);
+    }
+
+    fn typeOfInterned(self: *Sema, index: InternPool.Index) InternPool.Index {
+        return self.tempAir().typeOfInterned(self.pool, index);
+    }
+
     // no Airs are generated here, but the InternPool is populated with
     // types and identifiers, and a new analysis is called on each module body
     pub fn root(self: *Sema) !void {
@@ -298,8 +306,12 @@ const Sema = struct {
         // so a two pass approach is used
         const payload = self.cst.payload(self.cst.root);
         const sl = self.cst.indices(payload.root);
+
+        var toplevel: Scope = .toplevel;
+        var s = &toplevel;
+
         for (sl) |cst_index| {
-            const decl = try self.typeDef(cst_index);
+            const decl, s = try self.typeDef(s, cst_index);
             _ = decl;
             // const ptr = self.pool.declPtr(decl);
             // const name = self.pool.get(ptr.name).str;
@@ -327,7 +339,7 @@ const Sema = struct {
         try self.scratch.ensureUnusedCapacity(self.arena, sl.len);
         for (sl) |i| {
             const ai, s = try self.statement(s, i);
-            self.scratch.appendAssumeCapacity(@intFromEnum(ai));
+            if (ai) |node| self.scratch.appendAssumeCapacity(@intFromEnum(node));
         }
 
         const items: []const Index = @ptrCast(self.scratch.items[scratch_top..]);
@@ -335,11 +347,18 @@ const Sema = struct {
         return self.addNode(.{ .block = nodes });
     }
 
-    fn statement(self: *Sema, s: *Scope, index: Cst.Index) !struct { Index, *Scope } {
+    fn statement(self: *Sema, s: *Scope, index: Cst.Index) !struct { ?Index, *Scope } {
         const data = self.cst.payload(index);
 
         return switch (data) {
-            .def => self.def(s, index),
+            .def => out: {
+                const i, const scope = try self.def(s, index);
+                break :out .{ i, scope };
+            },
+            .type => out: {
+                _, const scope = try self.typeDef(s, index);
+                break :out .{ null, scope };
+            },
             .yield => .{ try self.yield(s, index), s },
             else => unimplemented(),
         };
@@ -366,7 +385,7 @@ const Sema = struct {
         const ty, const value = if (data.type == .null) tv: {
             // Type inference, so first evaluate the value, and then
             // determine its type and define the signal to that type.
-            const ri: ResultInfo = .ty(.null);
+            const ri: ResultInfo = .val(null);
             const value = try self.expression(s, ri, data.value);
             const ty = self.tempAir().typeOf(self.pool, value);
             break :tv .{ ty, value };
@@ -374,7 +393,7 @@ const Sema = struct {
             // Otherwise, first evaluate the type, and then use it in the
             // result context for the value (i.e. to evaluate anonymous
             // literals).
-            const ty = try self.type(data.type, .ty(.null));
+            const ty = try self.type(s, .ty(.null), data.type);
             const ri: ResultInfo = .{
                 .ctx = .{ .def_type = ty },
                 .name = name,
@@ -414,12 +433,12 @@ const Sema = struct {
         return self.addNode(.{ .yield = value });
     }
 
-    fn typeDef(self: *Sema, index: Cst.Index) !InternPool.DeclIndex {
+    fn typeDef(self: *Sema, s: *Scope, index: Cst.Index) !struct { InternPool.DeclIndex, *Scope } {
         const data = self.cst.payload(index).type;
         const ident_token = self.cst.mainToken(index).advance(1);
         const name = try self.internToken(ident_token);
 
-        const ty = try self.type(data, .ty(name));
+        const ty = try self.type(s, .ty(name), data);
         const decl = try self.pool.createDecl(.{
             .kind = .type,
             .name = name,
@@ -427,40 +446,138 @@ const Sema = struct {
         });
 
         try self.pool.decls_map.put(self.gpa, name, decl);
-        return decl;
+
+        const scope = try self.arena.create(Scope);
+        scope.* = .{
+            .parent = s,
+            .payload = .{ .type = .{
+                .name = name,
+                .type = ty,
+            } },
+        };
+
+        return .{ decl, scope };
     }
 
-    fn @"type"(self: *Sema, index: Cst.Index, ri: ResultInfo) Error!InternPool.Index {
+    fn @"type"(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) Error!InternPool.Index {
         const data = self.cst.payload(index);
 
         return switch (data) {
-            .ident => self.identType(index),
-            .bundle => self.bundle(index, ri),
-            .module => self.module(index, ri),
+            .ident => self.identType(s, index),
+            .bundle => self.bundle(s, ri, index),
+            .module => self.module(s, ri, index),
             else => unimplemented(),
         };
     }
 
-    fn identType(self: *Sema, index: Cst.Index) !InternPool.Index {
+    fn identValue(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const token = self.cst.mainToken(index);
+        const ident = try self.internToken(token);
+
+        // Resolve the identifier in the current scope to validate
+        // its existence. Then based on the result info, either:
+        // (1) re-emit the identifier (source to source translation)
+        // (2) inline the value (and possibly intern it)
+        const resolved = s.resolve(ident);
+        const rs = if (resolved) |rs| scope: {
+            break :scope rs;
+        } else {
+            try self.addError(.unknown_identifier, token);
+            return error.SourceError;
+        };
+
+        const value = switch (ri.ctx) {
+            .discard => unimplemented(),
+            // Type hint is not provided, so just resolve the type of the
+            // underlying definition and record it here (scope information
+            // is not preserved after semantic analysis so type is needed).
+            .def_inferred => value: {
+                const signal = rs.payload.def.index;
+                const ty = self.typeOfIndex(signal);
+                const node = try self.addNode(.{ .ident = .{ .signal = signal, .type = ty } });
+                break :value Value.index(node);
+            },
+            // Type hint is provided, so valid it against the type of the
+            // signal that was resolved.
+            .def_type => |hint| value: {
+                const signal = rs.payload.def.index;
+                const ty = self.typeOfIndex(signal);
+                std.debug.assert(hint != .null);
+                if (ty != hint) {
+                    try self.addError(.type_coerce_fail, token);
+                    return error.SourceError;
+                }
+                const node = try self.addNode(.{ .ident = .{ .signal = signal, .type = ty } });
+                break :value Value.index(node);
+            },
+            .type => unreachable,
+            // The const contexts are similar to the elaboration contexts
+            // `.def_inferred` and `.def_type` but validate that the resulting
+            // expression is compile time known and inline the result instead
+            // of re-emitting a node.
+            .const_inferred => value: {
+                const value = rs.payload.@"const".value;
+                break :value Value.ip(value);
+            },
+            .const_type => |hint| value: {
+                const value = rs.payload.@"const".value;
+
+                const ty = self.typeOfInterned(value);
+                std.debug.assert(hint != .null);
+                if (ty != hint) {
+                    try self.addError(.type_coerce_fail, token);
+                    return error.SourceError;
+                }
+                break :value Value.ip(value);
+            },
+        };
+
+        return value;
+    }
+
+    fn identType(self: *Sema, s: *Scope, index: Cst.Index) !InternPool.Index {
         const token = self.cst.mainToken(index);
         const str = self.cst.tokenString(token);
+        const ident = try self.pool.put(.{ .str = str });
 
-        if (std.mem.eql(u8, str, "bool")) return .bool;
+        // TODO: check reserved types in declaration
 
+        // First check the identifier against the builtin types.
+        // Because the bit vector types (bits, uint, sint) can
+        // be of any width, they cannot be exhaustively interned
+        // and are instead checked and lazily interned when used.
         const builtin: ?InternPool.Index = switch (str[0]) {
-            'b' => try self.bits(str),
-            'u' => try self.uint(str),
-            'i' => try self.sint(str),
+            // FIXME: this will incorrectly silence an allocator error
+            'b' => self.bits(str) catch null,
+            'u' => self.uint(str) catch null,
+            'i' => self.sint(str) catch null,
             else => null,
         };
 
-        // builtin types do not need to be looked up in scope
-        if (builtin) |ip| return ip;
+        // If there is a match, no need to resolve the identifier.
+        if (builtin) |ip| {
+            return ip;
+        }
 
-        // const ident = try self.pool.put(.{ .str = str });
-        // if ()
+        // Not builtin, so resolve the identifier in the current scope.
+        const resolved = s.resolve(ident);
+        // std.debug.print("{any}\n", .{resolved});
+        if (resolved) |rs| {
+            switch (rs.payload) {
+                .toplevel => unreachable,
+                .def, .@"const", .decl => {
+                    try self.addError(.shadow_type_signal, token);
+                    return error.SourceError;
+                },
+                .type => |*ty| {
+                    return ty.type;
+                },
+                .namespace => unimplemented(),
+            }
+        }
 
-        unimplemented();
+        try self.addError(.unknown_identifier, token);
+        return error.SourceError;
     }
 
     fn bits(self: *Sema, str: []const u8) !InternPool.Index {
@@ -490,7 +607,7 @@ const Sema = struct {
         return self.pool.put(.{ .ty = ty });
     }
 
-    fn bundle(self: *Sema, index: Cst.Index, ri: ResultInfo) !InternPool.Index {
+    fn bundle(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !InternPool.Index {
         const data = self.cst.payload(index).bundle;
         const items = self.cst.indices(data);
 
@@ -503,7 +620,7 @@ const Sema = struct {
             const field = self.cst.payload(idx).field;
             const token = self.cst.mainToken(idx);
             name.* = try self.internToken(token);
-            ty.* = try self.type(field, .ty(.null));
+            ty.* = try self.type(s, .ty(.null), field);
         }
 
         return self.pool.put(.{
@@ -524,7 +641,7 @@ const Sema = struct {
         return switch (data) {
             .bool => self.bool(s, ri, index),
             .integer => self.integer(s, ri, index),
-            .ident => self.identExpression(s, ri, index),
+            .ident => self.identValue(s, ri, index),
             .unary => self.unary(s, ri, index),
             .binary => self.binary(s, ri, index),
             .bundle_literal => self.bundleLiteral(s, ri, index),
@@ -598,38 +715,38 @@ const Sema = struct {
         };
     }
 
-    fn identExpression(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
-        const token = self.cst.mainToken(index);
-        const ident = try self.internToken(token);
-
-        // Resolve the identifer in the current scope to validate
-        // its existence. If valid, the signal is recorded and the
-        // identifier is re-emitted, not inlined (because this is
-        // a source to source translation).
-        const resolved = s.resolve(ident);
-        const signal = if (resolved) |rs| v: {
-            break :v rs.payload.def.index;
-        } else {
-            try self.addError(.unknown_identifier, token);
-            return error.SourceError;
-        };
-
-        // If a type hint is provided in the context, validate it
-        // against the type of the signal that was resolved.
-        const ty = self.typeOf(Value.index(signal));
-        if (ri.ctx == .def_type and ri.ctx.def_type != ty) {
-            try self.addError(.type_coerce_fail, token);
-            return error.SourceError;
-        }
-
-        const node = try self.addNode(.{
-            .ident = .{
-                .signal = signal,
-                .type = ty,
-            },
-        });
-        return Value.index(node);
-    }
+    // fn identExpression(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+    //     const token = self.cst.mainToken(index);
+    //     const ident = try self.internToken(token);
+    //
+    //     // Resolve the identifer in the current scope to validate
+    //     // its existence. If valid, the signal is recorded and the
+    //     // identifier is re-emitted, not inlined (because this is
+    //     // a source to source translation).
+    //     const resolved = s.resolve(ident);
+    //     const signal = if (resolved) |rs| v: {
+    //         break :v rs.payload.def.index;
+    //     } else {
+    //         try self.addError(.unknown_identifier, token);
+    //         return error.SourceError;
+    //     };
+    //
+    //     // If a type hint is provided in the context, validate it
+    //     // against the type of the signal that was resolved.
+    //     const ty = self.typeOf(Value.index(signal));
+    //     if (ri.ctx == .def_type and ri.ctx.def_type != ty) {
+    //         try self.addError(.type_coerce_fail, token);
+    //         return error.SourceError;
+    //     }
+    //
+    //     const node = try self.addNode(.{
+    //         .ident = .{
+    //             .signal = signal,
+    //             .type = ty,
+    //         },
+    //     });
+    //     return Value.index(node);
+    // }
 
     fn unary(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).unary;
@@ -754,7 +871,7 @@ const Sema = struct {
 
         const bundle_type = if (data.type != .null) type: {
             // if explicitly specified, no need to infer from context
-            const ty = try self.type(data.type, .ty(.null));
+            const ty = try self.type(s, .ty(.null), data.type);
             break :type ty;
         } else type: {
             // otherwise use the context
@@ -873,7 +990,7 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn module(self: *Sema, index: Cst.Index, ri: ResultInfo) !InternPool.Index {
+    fn module(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !InternPool.Index {
         const data = self.cst.payload(index).module;
         const ports = self.cst.payload(data.ports).ports;
         const inputs = self.cst.indices(ports.inputs);
@@ -887,13 +1004,13 @@ const Sema = struct {
             const input = self.cst.payload(idx).input;
             const token = self.cst.mainToken(idx);
             const name = try self.internToken(token);
-            const ty = try self.type(input, .ty(.null));
+            const ty = try self.type(s, .ty(.null), input);
 
             input_names[i] = name;
             input_types[i] = ty;
         }
 
-        const output_type = try self.type(ports.output, .ty(.null));
+        const output_type = try self.type(s, .ty(.null), ports.output);
         const signature = try self.putType(.{
             .signature = .{
                 .input_names = input_names,
@@ -906,12 +1023,7 @@ const Sema = struct {
         errdefer sema.deinit();
 
         // the parameter nodes should actually exist in the inner scope
-        var toplevel: Scope = .{
-            .parent = null,
-            .payload = .{ .toplevel = {} },
-        };
-
-        var scope = &toplevel;
+        var scope = s;
         const scopes = try self.arena.alloc(Scope, inputs.len);
         for (input_names, input_types, 0..) |name, ty, i| {
             const param = try sema.addNode(.{
