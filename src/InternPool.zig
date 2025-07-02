@@ -204,6 +204,7 @@ pub const Index = enum(u31) {
     bfalse,
     /// Common strings.
     builtin_out,
+    builtin_bool,
 
     _,
 
@@ -252,6 +253,7 @@ const static_keys = [_]Key{
     .{ .tv = TypedValue.common.true },
     .{ .tv = TypedValue.common.false },
     .{ .str = "out" },
+    .{ .str = "bool" },
 };
 
 pub fn init(gpa: Allocator) !InternPool {

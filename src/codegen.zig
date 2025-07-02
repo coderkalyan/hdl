@@ -49,6 +49,7 @@ fn CodeGen(WriterType: type) type {
         const Error = WriterType.Error || Allocator.Error;
 
         const ExprIterator = struct {
+            cg: *Super,
             arena: Allocator,
             air: *const Air,
             stack: std.ArrayListUnmanaged(Frame),
@@ -58,7 +59,11 @@ fn CodeGen(WriterType: type) type {
                 ptr: u32,
             };
 
-            pub fn init(arena: Allocator, air: *const Air, root: Value) !ExprIterator {
+            // NOTE: The naming is very confusing but Self is not
+            // defined here and the parent defines it to itself.
+            const Super = Self;
+
+            pub fn init(cg: *Super, arena: Allocator, air: *const Air, root: Value) !ExprIterator {
                 var stack: std.ArrayListUnmanaged(Frame) = .empty;
                 try stack.append(arena, .{
                     .value = root,
@@ -66,13 +71,14 @@ fn CodeGen(WriterType: type) type {
                 });
 
                 return .{
+                    .cg = cg,
                     .arena = arena,
                     .air = air,
                     .stack = stack,
                 };
             }
 
-            pub fn next(self: *ExprIterator) !?Value {
+            pub fn next(self: *ExprIterator) !?[]const u8 {
                 const stack = self.stack.items;
                 if (stack.len == 0) return null;
 
@@ -82,7 +88,7 @@ fn CodeGen(WriterType: type) type {
                     // bundle literals when those are added
                     if (frame.ptr == 0) {
                         frame.ptr += 1;
-                        return frame.value;
+                        return try self.cg.formatExpression(frame.value);
                     } else {
                         return null;
                     }
@@ -90,14 +96,38 @@ fn CodeGen(WriterType: type) type {
 
                 const index = frame.value.payload.index;
                 const items = switch (self.air.get(index)) {
-                    .bundle_literal => |bundle| self.air.values(bundle.inits),
+                    .bundle_literal => |*bundle| self.air.values(bundle.inits),
+                    .ident => |*id| ident: {
+                        const ty = self.cg.pool.get(id.type).ty;
+                        // FIXME: this absolutely horrific and probably doesn't
+                        // work recursively correctly
+                        if (ty == .bundle) {
+                            if (frame.ptr < ty.bundle.field_names.len) {
+                                const name = ty.bundle.field_names[frame.ptr];
+                                const str = self.cg.pool.get(name).str;
+                                frame.ptr += 1;
+                                const base = try self.cg.formatExpression(frame.value);
+                                const bytes = &self.cg.bytes;
+                                const bytes_top = bytes.items.len;
+                                try bytes.ensureUnusedCapacity(self.cg.arena, base.len + 1 + str.len);
+                                bytes.appendSliceAssumeCapacity(base);
+                                bytes.appendAssumeCapacity('_');
+                                bytes.appendSliceAssumeCapacity(str);
+                                return bytes.items[bytes_top..];
+                            } else {
+                                _ = self.stack.pop();
+                                return self.next();
+                            }
+                        }
+                        break :ident &.{frame.value};
+                    },
                     else => &.{frame.value},
                 };
 
                 if (frame.ptr < items.len) {
                     const item = items[frame.ptr];
                     frame.ptr += 1;
-                    return item;
+                    return try self.cg.formatExpression(item);
                 } else {
                     _ = self.stack.pop();
                     return self.next();
@@ -150,10 +180,10 @@ fn CodeGen(WriterType: type) type {
                 for (stack, 0..) |*frame, i| {
                     const name = self.cg.pool.get(frame.name).str;
                     try bytes.ensureUnusedCapacity(self.cg.arena, name.len + 1);
-                    try bytes.appendSlice(self.cg.arena, name);
-                    // bytes.appendSliceAssumeCapacity(name);
-                    // if (i < stack.len - 1) bytes.appendAssumeCapacity('_');
-                    if (i < stack.len - 1) try bytes.append(self.cg.arena, '_');
+                    bytes.appendSliceAssumeCapacity(name);
+                    if (i < stack.len - 1) bytes.appendAssumeCapacity('_');
+                    // try bytes.appendSlice(self.cg.arena, name);
+                    // if (i < stack.len - 1) try bytes.append(self.cg.arena, '_');
                 }
 
                 const frame = &stack[stack.len - 1];
@@ -168,10 +198,10 @@ fn CodeGen(WriterType: type) type {
 
                             const str = self.cg.pool.get(name).str;
                             try bytes.ensureUnusedCapacity(self.cg.arena, str.len + 1);
-                            // bytes.appendAssumeCapacity('_');
-                            // bytes.appendSliceAssumeCapacity(str);
-                            try bytes.append(self.cg.arena, '_');
-                            try bytes.appendSlice(self.cg.arena, str);
+                            bytes.appendAssumeCapacity('_');
+                            bytes.appendSliceAssumeCapacity(str);
+                            // try bytes.append(self.cg.arena, '_');
+                            // try bytes.appendSlice(self.cg.arena, str);
 
                             return .{
                                 .name = bytes.items[bytes_top..],
@@ -184,7 +214,6 @@ fn CodeGen(WriterType: type) type {
                     },
                     .module => unreachable,
                     else => {
-                        // std.debug.print("name: '{s}'\n", .{bytes.items[bytes_top..]});
                         _ = self.stack.pop();
                         return .{
                             .name = bytes.items[bytes_top..],
@@ -233,16 +262,14 @@ fn CodeGen(WriterType: type) type {
                     break;
                 }
 
-                // std.debug.print("target: '{s}'\n", .{target.?.name});
                 const datatype_tmp = try self.type(target.?.type);
                 const datatype = try self.arena.alloc(u8, datatype_tmp.len);
                 @memcpy(datatype, datatype_tmp);
                 const name_tmp = target.?.name;
                 const name = try self.arena.alloc(u8, name_tmp.len);
                 @memcpy(name, name_tmp);
-                const expr_tmp = try self.formatExpression(value.?);
-                const expr = try self.arena.alloc(u8, expr_tmp.len);
-                @memcpy(expr, expr_tmp);
+                const expr = try self.arena.alloc(u8, value.?.len);
+                @memcpy(expr, value.?);
                 try self.writer.print("wire", .{});
                 if (datatype.len > 0) {
                     try self.writer.print(" {s}", .{datatype});
@@ -254,7 +281,6 @@ fn CodeGen(WriterType: type) type {
                 try self.writer.print(" = {s};", .{expr});
                 try self.writer.newline();
             }
-            // std.debug.print("\n", .{});
         }
 
         fn yield(self: *Self, index: Index) !void {
@@ -271,7 +297,7 @@ fn CodeGen(WriterType: type) type {
                 }
 
                 const name = target.?.name;
-                const expr = try self.formatExpression(value.?);
+                const expr = value.?; // try self.formatExpression(value.?);
                 try self.writer.print("assign {s} = {s};", .{ name, expr });
                 try self.writer.newline();
             }
@@ -293,7 +319,7 @@ fn CodeGen(WriterType: type) type {
         }
 
         fn iterateExpression(self: *Self, root: Value) !ExprIterator {
-            return .init(self.arena, self.air, root);
+            return .init(self, self.arena, self.air, root);
         }
 
         fn iterateTarget(self: *Self, base: InternPool.Index, root: InternPool.Index) !TargetIterator {

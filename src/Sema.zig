@@ -70,6 +70,13 @@ const Scope = struct {
         .payload = .{ .toplevel = {} },
     };
 
+    pub fn namespace(parent: *Scope) Scope {
+        return .{
+            .parent = parent,
+            .payload = .{ .namespace = .empty },
+        };
+    }
+
     pub fn resolve(scope: *Scope, name: InternPool.Index) ?*Scope {
         var s = scope;
         while (true) {
@@ -101,6 +108,16 @@ const Scope = struct {
         }
 
         return i;
+    }
+
+    pub fn find(scope: *Scope, tag: std.meta.Tag(Payload)) ?*Scope {
+        var s: ?*Scope = scope;
+        while (s) |next| {
+            if (next.payload == tag) return next;
+            s = next;
+        }
+
+        return null;
     }
 };
 
@@ -308,7 +325,8 @@ const Sema = struct {
         const sl = self.cst.indices(payload.root);
 
         var toplevel: Scope = .toplevel;
-        var s = &toplevel;
+        var namespace: Scope = .namespace(&toplevel);
+        var s = &namespace;
 
         for (sl) |cst_index| {
             const decl, s = try self.typeDef(s, cst_index);
@@ -447,16 +465,22 @@ const Sema = struct {
 
         try self.pool.decls_map.put(self.gpa, name, decl);
 
-        const scope = try self.arena.create(Scope);
-        scope.* = .{
-            .parent = s,
-            .payload = .{ .type = .{
-                .name = name,
-                .type = ty,
-            } },
-        };
+        if (self.scope == .root) {
+            const scope = s.find(.namespace).?;
+            try scope.payload.namespace.put(self.arena, name, ty);
+            return .{ decl, s };
+        } else {
+            const scope = try self.arena.create(Scope);
+            scope.* = .{
+                .parent = s,
+                .payload = .{ .type = .{
+                    .name = name,
+                    .type = ty,
+                } },
+            };
 
-        return .{ decl, scope };
+            return .{ decl, scope };
+        }
     }
 
     fn @"type"(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) Error!InternPool.Index {
@@ -541,6 +565,9 @@ const Sema = struct {
         const ident = try self.pool.put(.{ .str = str });
 
         // TODO: check reserved types in declaration
+        if (ident == .builtin_bool) {
+            return .bool;
+        }
 
         // First check the identifier against the builtin types.
         // Because the bit vector types (bits, uint, sint) can
@@ -572,7 +599,9 @@ const Sema = struct {
                 .type => |*ty| {
                     return ty.type;
                 },
-                .namespace => unimplemented(),
+                .namespace => |*ns| {
+                    return ns.get(ident).?;
+                },
             }
         }
 
