@@ -4,7 +4,9 @@ const Cst = @import("Cst.zig");
 const parse = @import("parse.zig");
 const InternPool = @import("InternPool.zig");
 const Sema = @import("Sema.zig");
-const codegen = @import("codegen.zig");
+const Builder = @import("verilog/Builder.zig");
+const Mir = @import("verilog/Mir.zig");
+const Formatter = @import("verilog/print.zig").Formatter;
 
 const io = std.io;
 const max_file_size = std.math.maxInt(u32);
@@ -65,8 +67,12 @@ pub fn main() !void {
     const decl_index = pool.decls_map.get(root_ip).?;
     const decl = pool.declPtr(decl_index);
     const module = pool.get(decl.type).ty.module;
-    // const air = pool.airPtr(module.air);
-    try codegen.generate(gpa, stdout, &pool, module);
+    var mir = try Builder.build(gpa, &pool, module);
+    defer mir.deinit(gpa);
+
+    var formatter: Formatter(@TypeOf(stdout)) = .init(stdout, &pool, &mir);
+    try formatter.format(mir.toplevel);
+    // std.debug.print("{any}\n", .{mir.nodes.items(.tag)});
 
     // var decls = pool.decls_map.iterator();
     // while (decls.next()) |entry| {
