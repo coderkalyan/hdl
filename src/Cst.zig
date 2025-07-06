@@ -168,9 +168,9 @@ pub const Node = struct {
             // expression nodes for the start and end indices
             bounds: ExtraIndex,
         },
-        // member (bundle field access by name)
+        // bundle field access by name
         // main_token is the field name, and the index is the bundle expression
-        member: Index,
+        field_access: Index,
 
         // definition of an signal 'let signal[: type] = expr'
         // all signals are immutable once defined (SSA form)

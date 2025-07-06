@@ -675,6 +675,7 @@ const Sema = struct {
             .binary => self.binary(s, ri, index),
             .bundle_literal => self.bundleLiteral(s, ri, index),
             .subscript => self.subscript(s, ri, index),
+            .field_access => self.fieldAccess(s, ri, index),
             .slice => self.slice(s, ri, index),
             else => unimplemented(),
         };
@@ -1014,6 +1015,52 @@ const Sema = struct {
             .bitslice = .{
                 .bitslice = extra,
                 .type = dty,
+            },
+        });
+        return Value.index(node);
+    }
+
+    fn fieldAccess(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const field = self.cst.payload(index).field_access;
+        const ident_token = self.cst.mainToken(index);
+        const name = try self.internToken(ident_token);
+        const operand = try self.expression(s, .val(null), field);
+
+        const bundle_type = bundle: {
+            const ip = self.typeOf(operand);
+            const ty = self.pool.get(ip).ty;
+            switch (ty) {
+                .bundle => |val| break :bundle val,
+                else => {
+                    const main_token = self.cst.mainToken(index);
+                    try self.addError(.type_coerce_fail, main_token);
+                    return error.SourceError;
+                },
+            }
+        };
+
+        const i = for (bundle_type.field_names, 0..) |field_name, i| {
+            if (name == field_name) {
+                break i;
+            }
+        } else {
+            // The field name was not found in the underlying type.
+            try self.addError(.field_unknown, ident_token);
+            return error.SourceError;
+        };
+
+        // If a type hint is provided in the context, validate it
+        // against the type of the signal that was resolved.
+        const dty = bundle_type.field_types[i];
+        if (ri.ctx == .def_type and ri.ctx.def_type != dty) {
+            try self.addError(.type_coerce_fail, ident_token);
+            return error.SourceError;
+        }
+
+        const node = try self.addNode(.{
+            .field = .{
+                .operand = operand,
+                .index = @intCast(i),
             },
         });
         return Value.index(node);

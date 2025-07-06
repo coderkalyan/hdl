@@ -404,7 +404,8 @@ fn airExpressionInner(b: *Builder, top: *Context, ctx: *Context, value: Air.Valu
                 .limplies => b.airImplies(top, ctx, node),
                 .bit => b.airBit(top, ctx, node),
                 .bitslice => b.airBitSlice(top, ctx, node),
-                .subscript, .member => unimplemented(),
+                .subscript => unimplemented(),
+                .field => b.airField(top, ctx, node),
                 .def, .decl, .yield, .block, .toplevel => unreachable,
             };
         },
@@ -688,9 +689,22 @@ fn airImplies(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indic
     return .{ .single = paren };
 }
 
+fn airField(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices {
+    const field = b.air.get(node).field;
+
+    // Because aggregates are recursively elaborated, no need to emit
+    // a node heree. Just annotate the context with the field index
+    // and elaborate the operand.
+    var inner: Context = .field(field.index);
+    inner.next = top.next;
+    top.next = &inner;
+    defer top.next = inner.next;
+
+    return try b.airExpressionInner(top, ctx, field.operand);
+}
+
 // NOTE: this is not meant to be used in release builds
 fn unimplemented() noreturn {
     std.debug.print("unimplemented!\n", .{});
     unreachable;
 }
-

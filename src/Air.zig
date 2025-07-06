@@ -193,12 +193,12 @@ pub const Node = union(enum) {
         index: Value,
     },
 
-    // member (bundle field access by name)
-    member: struct {
+    // bundle field access by name
+    field: struct {
         // expression node for the bundle
-        value: Value,
-        // field name
-        name: InternPool.Index,
+        operand: Value,
+        // field index in the bundle
+        index: u32,
     },
 
     // definition of an signal 'let signal[: type] = expr'
@@ -258,7 +258,6 @@ pub const Node = union(enum) {
     pub const Tag = std.meta.Tag(Node);
 };
 
-// pool: *const InternPool,
 nodes: std.MultiArrayList(Node).Slice,
 extra: []const u32,
 body: Index,
@@ -341,8 +340,13 @@ pub fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) Inte
         => .bool,
         .bit => .b1,
         .bitslice => |bitslice| bitslice.type,
-        // FIXME: implement these two aggregate accessors
-        .subscript, .member => unreachable,
+        .field => |*field| field: {
+            const ty = self.typeOf(pool, field.operand);
+            const bundle = pool.get(ty).ty.bundle;
+            break :field bundle.field_types[field.index];
+        },
+        // FIXME: implement this aggregate accessor
+        .subscript => unreachable,
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,
         .decl => |signal| self.extraData(signal, Air.Node.Signal).type,
         .param => |param| param.type,

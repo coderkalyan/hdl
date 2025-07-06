@@ -286,7 +286,7 @@ pub const Parser = struct {
                 // handles subscript and slice, since we can't
                 // yet look far enough to know which it is
                 .l_bracket => try p.subscript(expr),
-                // .period => try p.attribute(expr),
+                .period => try p.fieldAccess(expr),
                 .l_paren => try p.moduleLiteral(expr),
                 else => return expr,
             };
@@ -622,28 +622,15 @@ pub const Parser = struct {
         }
     }
 
-    // fn tupleLiteral(p: *Parser) !Node.Index {
-    //     const l_paren_token = p.index;
-    //     const scratch_top = p.scratch.items.len;
-    //     defer p.scratch.shrinkRetainingCapacity(scratch_top);
-    //     const elements = try p.parseList(expression, .{ .open = .l_paren, .close = .r_paren });
-    //
-    //     return p.addNode(.{
-    //         .main_token = l_paren_token,
-    //         .data = .{ .tuple_literal = .{ .elements = elements } },
-    //     });
-    // }
+    fn fieldAccess(p: *Parser, operand: Cst.Index) !Index {
+        _ = try p.expect(.period);
+        const ident_token = try p.expect(.ident);
 
-    // operand.attribute
-    // fn attribute(p: *Parser, operand: Node.Index) Error!Node.Index {
-    //     const dot_token = try p.expect(.period);
-    //     _ = try p.expect(.ident);
-    //
-    //     return p.addNode(.{
-    //         .main_token = dot_token,
-    //         .data = .{ .attribute = operand },
-    //     });
-    // }
+        return p.addNode(.{
+            .main_token = ident_token,
+            .payload = .{ .field_access = operand },
+        });
+    }
 
     fn statement(p: *Parser) Error!Index {
         const node = switch (p.current()) {
