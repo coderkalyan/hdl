@@ -59,11 +59,6 @@ const Context = struct {
     }
 };
 
-const ScratchSlice = struct {
-    start: u32,
-    end: u32,
-};
-
 const Scratch = std.ArrayListUnmanaged(Mir.Index);
 const Indices = union(enum) {
     single: Mir.Index,
@@ -136,12 +131,6 @@ fn typeOf(b: *Builder, value: Air.Value) InternPool.Index {
 
 fn typeOfIndex(b: *Builder, node: Air.Index) InternPool.Index {
     return b.air.typeOfIndex(b.pool, node);
-}
-
-/// The lifetime of the returned slice ends at the next insert
-/// into the scratch buffer.
-fn scratchSlice(b: *Builder, slice: ScratchSlice) []const u32 {
-    return b.scratch.items[slice.start..slice.end];
 }
 
 fn airModule(b: *Builder) !Mir.Index {
@@ -730,7 +719,9 @@ fn airBitSlice(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indi
 
     // The bit select operator is not defined on aggregate types.
     const operand = try b.airExpressionInner(top, ctx, bitslice.operand);
-    const upper = try b.ipExpressionInner(top, ctx, bitslice.upper);
+    const exclusive = b.pool.get(bitslice.upper).tv.val.int;
+    const inclusive = try b.pool.put(.{ .tv = .{ .ty = .int, .val = .{ .int = exclusive - 1 } } });
+    const upper = try b.ipExpressionInner(top, ctx, inclusive);
     const lower = try b.ipExpressionInner(top, ctx, bitslice.lower);
     const extra = try b.addExtra(Mir.Node.Range{
         .upper = upper.single,
