@@ -116,6 +116,7 @@ pub const Item = struct {
         bool_ty,
         int_ty,
         bundle_ty,
+        array_ty,
         signature_ty,
         module_ty,
         int_tv,
@@ -155,9 +156,15 @@ pub const Item = struct {
     /// Unpacks to `Type.Bundle`.
     pub const Bundle = struct {
         cst_index: Cst.Index,
-        name: InternPool.Index,
+        name: Index,
         field_names: Index.Slice,
         field_types: Index.Slice,
+    };
+
+    /// Unpacks to `Type.Array`.
+    pub const Array = struct {
+        element_type: Index,
+        len: u32,
     };
 
     /// Unpacks to `Type.Signature`.
@@ -367,6 +374,7 @@ pub fn get(pool: *const InternPool, _index: Index) Key {
         .bool_ty,
         .int_ty,
         .bundle_ty,
+        .array_ty,
         .signature_ty,
         .module_ty,
         => .{ .ty = Type.deserialize(item, pool) },

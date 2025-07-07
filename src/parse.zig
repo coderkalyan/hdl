@@ -332,6 +332,7 @@ pub const Parser = struct {
             .k_true, .k_false => p.boolean(),
             .l_paren => p.paren(.value),
             .period => p.bundleLiteral(),
+            .l_bracket => p.arrayLiteral(),
             else => {
                 std.debug.print("{}\n", .{p.current()});
                 return Error.UnexpectedToken;
@@ -460,12 +461,16 @@ pub const Parser = struct {
 
     fn arrayLiteral(p: *Parser) !Index {
         const l_bracket_token = p.index;
-        const elements = try p.parseList(expression, .{ .open = .l_bracket, .close = .r_bracket });
+        const elements = try p.parseList(elementInit, .{ .open = .l_bracket, .close = .r_bracket });
 
         return p.addNode(.{
             .main_token = l_bracket_token,
-            .data = .{ .list_literal = .{ .elements = elements } },
+            .payload = .{ .array_literal = elements },
         });
+    }
+
+    fn elementInit(p: *Parser) !Index {
+        return p.expression(.value);
     }
 
     fn module(p: *Parser) !Index {

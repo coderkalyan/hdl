@@ -56,6 +56,13 @@ pub const Value = packed struct(u32) {
             .ip => null,
         };
     }
+
+    pub fn asInterned(value: Value) ?InternPool.Index {
+        return switch (value.tag) {
+            .index => null,
+            .ip => value.payload.ip,
+        };
+    }
 };
 
 // start and end index into the extra data array
@@ -113,7 +120,7 @@ pub const Node = union(enum) {
     // typed array literal '[expr, expr, ...]'
     array_literal: struct {
         type: InternPool.Index,
-        values: Indices,
+        inits: Indices,
     },
 
     // module instantiation literal 'Foo(input=expr, ...)'
@@ -169,6 +176,10 @@ pub const Node = union(enum) {
     lxor: Binary,
     // logical implication
     limplies: Binary,
+    // equality
+    eq: Binary,
+    // inequality
+    ne: Binary,
 
     /// Extract a single bit from a bit vector or int.
     bit: struct {
@@ -186,6 +197,8 @@ pub const Node = union(enum) {
     },
 
     // subscript (array element access by index)
+    // TODO: rename this to element to distinguish from the
+    // other subscript operators (bit-slice and part-slice)
     subscript: struct {
         // expression node for the array
         operand: Value,
@@ -337,6 +350,8 @@ pub fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) Inte
         .lor,
         .lxor,
         .limplies,
+        .eq,
+        .ne,
         => .bool,
         .bit => .b1,
         .bitslice => |bitslice| bitslice.type,
@@ -345,8 +360,11 @@ pub fn typeOfIndex(self: *const Air, pool: *const InternPool, index: Index) Inte
             const bundle = pool.get(ty).ty.bundle;
             break :field bundle.field_types[field.index];
         },
-        // FIXME: implement this aggregate accessor
-        .subscript => unreachable,
+        .subscript => |*subscript| subscript: {
+            const ty = self.typeOf(pool, subscript.operand);
+            const array = pool.get(ty).ty.array;
+            break :subscript array.element_type;
+        },
         .def => |def| self.extraData(def.signal, Air.Node.Signal).type,
         .decl => |signal| self.extraData(signal, Air.Node.Signal).type,
         .param => |param| param.type,

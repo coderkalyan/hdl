@@ -55,6 +55,8 @@ pub fn Formatter(WriterType: type) type {
                 .bin_bxor,
                 .bin_lor,
                 .bin_land,
+                .bin_eq,
+                .bin_ne,
                 => try self.mirBinary(node),
                 .bit_select => try self.mirBitSelect(node),
                 .part_select => try self.mirPartSelect(node),
@@ -146,6 +148,8 @@ pub fn Formatter(WriterType: type) type {
                 .bin_bxor => try self.writer.print(" ^ ", .{}),
                 .bin_lor => try self.writer.print(" || ", .{}),
                 .bin_land => try self.writer.print(" && ", .{}),
+                .bin_eq => try self.writer.print(" == ", .{}),
+                .bin_ne => try self.writer.print(" != ", .{}),
                 else => unreachable,
             }
             try self.format(binary.r);

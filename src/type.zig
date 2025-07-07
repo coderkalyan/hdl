@@ -20,6 +20,8 @@ pub const Type = union(enum) {
     int: void,
     // hardware bundle of nets
     bundle: Bundle,
+    // hardware array of nets of same type
+    array: Array,
     // Module signature with input ports and one output port.
     // Signatures are compared structurally, so two signatures with
     // different names but the same input and output types are equal.
@@ -44,6 +46,16 @@ pub const Type = union(enum) {
         /// length.
         field_names: []const Index,
         field_types: []const Index,
+    };
+
+    pub const Array = struct {
+        /// Array types are structurally equivalent, and therefore do
+        /// not carry any name or Cst information. Types are equivalent
+        /// if the child type and length are the same.
+        /// The type of the elements in the array.
+        element_type: Index,
+        /// The length of the array, which is a compile-time constant.
+        len: u32,
     };
 
     pub const Signature = struct {
@@ -91,6 +103,17 @@ pub const Type = union(enum) {
 
                 break :bundle .{
                     .tag = .bundle_ty,
+                    .payload = .{ .extra = extra },
+                };
+            },
+            .array => |array| array: {
+                const extra = try pool.addExtra(Item.Array{
+                    .element_type = array.element_type,
+                    .len = array.len,
+                });
+
+                break :array .{
+                    .tag = .array_ty,
                     .payload = .{ .extra = extra },
                 };
             },
@@ -144,6 +167,16 @@ pub const Type = union(enum) {
                     },
                 };
             },
+            .array_ty => type: {
+                const array = pool.extraData(item.payload.extra, Item.Array);
+
+                break :type .{
+                    .array = .{
+                        .element_type = array.element_type,
+                        .len = array.len,
+                    },
+                };
+            },
             .signature_ty => type: {
                 const signature = pool.extraData(item.payload.extra, Item.Signature);
                 const input_names: []const Index = pool.extraSlice(signature.input_names);
@@ -180,6 +213,7 @@ pub const Type = union(enum) {
         // TODO: this can be automated with a correct "deep" recursive
         // hasher (either find one in the standard library or model it
         // after std.mem.eql and std.meta.eql)
+        // TODO: these should probably be captured by reference
         switch (ty) {
             .bits, .uint, .sint => |width| hasher.update(asBytes(&width)),
             .bool, .int => {},
@@ -188,6 +222,10 @@ pub const Type = union(enum) {
                 hasher.update(asBytes(&bundle.name));
                 for (bundle.field_names) |*field| hasher.update(asBytes(field));
                 for (bundle.field_types) |*field| hasher.update(asBytes(field));
+            },
+            .array => |array| {
+                hasher.update(asBytes(&array.element_type));
+                hasher.update(asBytes(&array.len));
             },
             .signature => |signature| {
                 for (signature.input_names) |*field| hasher.update(asBytes(field));

@@ -94,6 +94,12 @@ pub const Node = struct {
         /// Binary logical and operator.
         /// payload: `binary`
         bin_land,
+        /// Binary equivalence operator.
+        /// payload: `binary`
+        bin_eq,
+        /// Binary inequivalence operator.
+        /// payload: `binary`
+        bin_ne,
         /// Bit-select operator (single index).
         /// payload: `binary`
         bit_select,

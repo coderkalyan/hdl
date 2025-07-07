@@ -35,6 +35,8 @@ const Context = struct {
         head,
         /// Elaborate a single field in a bundle by index.
         field: u32,
+        // Elaborate a single element in an array by index.
+        element: u32,
     };
 
     pub const head: Context = .{
@@ -46,6 +48,13 @@ const Context = struct {
         return .{
             .next = null,
             .payload = .{ .field = index },
+        };
+    }
+
+    pub fn element(index: u32) Context {
+        return .{
+            .next = null,
+            .payload = .{ .element = index },
         };
     }
 };
@@ -354,6 +363,17 @@ fn airNetInner(b: *Builder, scratch: *Scratch, optional_ctx: ?*Context, ty: Inte
                     try b.airNetInner(scratch, null, field_type);
                 }
             },
+            .array => {
+                const array = b.pool.get(ty).ty.array;
+                for (0..array.len) |i| {
+                    const bytes_top = b.bytes.items.len;
+                    defer b.bytes.shrinkRetainingCapacity(bytes_top);
+                    const writer = b.bytes.writer(b.arena);
+                    try writer.print("_{}", .{i});
+
+                    try b.airNetInner(scratch, null, array.element_type);
+                }
+            },
             .module => unimplemented(),
         }
     }
@@ -366,7 +386,7 @@ fn airType(b: *Builder, ip: InternPool.Index) !Mir.Index {
         .sint => |width| try b.addNode(.net_wire_signed, .{ .size = width }),
         .bool => try b.addNode(.net_wire_unsigned, .{ .size = 1 }),
         .int, .signature, .module => unreachable,
-        .bundle => unreachable,
+        .bundle, .array => unreachable,
     };
 }
 
@@ -384,7 +404,8 @@ fn airExpressionInner(b: *Builder, top: *Context, ctx: *Context, value: Air.Valu
                 .ident => b.airIdent(top, ctx, node),
                 .bundle_literal => b.airBundleLiteral(top, ctx, node),
                 .field_init => unreachable,
-                .array_literal, .module_literal => unimplemented(),
+                .array_literal => b.airArrayLiteral(top, ctx, node),
+                .module_literal => unimplemented(),
                 .input_init, .param => unreachable,
                 .ineg,
                 .bnot,
@@ -399,12 +420,14 @@ fn airExpressionInner(b: *Builder, top: *Context, ctx: *Context, value: Air.Valu
                 .land,
                 .lor,
                 .lxor,
+                .eq,
+                .ne,
                 => b.airBinary(top, ctx, node),
                 // .limplies => b.airImplies(top, ctx, node),
                 .limplies => b.airImplies(top, ctx, node),
                 .bit => b.airBit(top, ctx, node),
                 .bitslice => b.airBitSlice(top, ctx, node),
-                .subscript => unimplemented(),
+                .subscript => b.airSubscript(top, ctx, node),
                 .field => b.airField(top, ctx, node),
                 .def, .decl, .yield, .block, .toplevel => unreachable,
             };
@@ -492,19 +515,34 @@ fn airIdentInner(b: *Builder, scratch: *Scratch, optional_ctx: ?*Context, ty: In
     if (optional_ctx) |ctx| {
         // Context was provided, so extract the necessary subset
         // of the aggregate type and elaborate recursively.
-        const field = ctx.payload.field;
-        const bundle = b.pool.get(ty).ty.bundle;
-        const field_name = bundle.field_names[field];
+        switch (ctx.payload) {
+            .head => unreachable,
+            .field => |field| {
+                const bundle = b.pool.get(ty).ty.bundle;
+                const field_name = bundle.field_names[field];
 
-        const str = b.pool.get(field_name).str;
-        const bytes_top = b.bytes.items.len;
-        defer b.bytes.shrinkRetainingCapacity(bytes_top);
-        try b.bytes.ensureUnusedCapacity(b.arena, str.len + 1);
-        b.bytes.appendAssumeCapacity('_');
-        b.bytes.appendSliceAssumeCapacity(str);
+                const str = b.pool.get(field_name).str;
+                const bytes_top = b.bytes.items.len;
+                defer b.bytes.shrinkRetainingCapacity(bytes_top);
+                try b.bytes.ensureUnusedCapacity(b.arena, str.len + 1);
+                b.bytes.appendAssumeCapacity('_');
+                b.bytes.appendSliceAssumeCapacity(str);
 
-        const field_type = bundle.field_types[field];
-        try b.airIdentInner(scratch, ctx.next, field_type);
+                const field_type = bundle.field_types[field];
+                try b.airIdentInner(scratch, ctx.next, field_type);
+            },
+            .element => |element| {
+                const array = b.pool.get(ty).ty.array;
+
+                const bytes_top = b.bytes.items.len;
+                defer b.bytes.shrinkRetainingCapacity(bytes_top);
+                const writer = b.bytes.writer(b.arena);
+                try writer.print("_{}", .{element});
+
+                const element_type = array.element_type;
+                try b.airIdentInner(scratch, ctx.next, element_type);
+            },
+        }
     } else {
         // No context provided, so elaborate all aggregate subfields
         // recursively.
@@ -531,6 +569,17 @@ fn airIdentInner(b: *Builder, scratch: *Scratch, optional_ctx: ?*Context, ty: In
                     try b.airIdentInner(scratch, null, field_type);
                 }
             },
+            .array => {
+                const array = b.pool.get(ty).ty.array;
+                for (0..array.len) |i| {
+                    const bytes_top = b.bytes.items.len;
+                    defer b.bytes.shrinkRetainingCapacity(bytes_top);
+                    const writer = b.bytes.writer(b.arena);
+                    try writer.print("_{}", .{i});
+
+                    try b.airIdentInner(scratch, null, array.element_type);
+                }
+            },
             .module => unimplemented(),
         }
     }
@@ -547,6 +596,28 @@ fn airBundleLiteral(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) 
     // and is elaborated recursively.
     var scratch: Scratch = .empty;
     const inits = b.air.values(bundle_literal.inits);
+    for (inits) |init| {
+        const inner = try b.airExpressionInner(top, ctx, init);
+        switch (inner) {
+            .single => |index| try scratch.append(b.arena, index),
+            .multi => |indices| try scratch.appendSlice(b.arena, indices),
+        }
+    }
+
+    return .{ .multi = try scratch.toOwnedSlice(b.arena) };
+}
+
+fn airArrayLiteral(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices {
+    const array_literal = b.air.get(node).array_literal;
+    const ty = b.typeOfIndex(node);
+    std.debug.assert(b.pool.get(ty).ty == .array);
+
+    // FIXME: doesn't elaborate context
+    //
+    // Each field initializer in a bundle literal is its own expression
+    // and is elaborated recursively.
+    var scratch: Scratch = .empty;
+    const inits = b.air.values(array_literal.inits);
     for (inits) |init| {
         const inner = try b.airExpressionInner(top, ctx, init);
         switch (inner) {
@@ -597,8 +668,10 @@ fn airParen(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices
 fn airBinary(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices {
     const air_tag = b.air.tag(node);
     const binary = switch (b.air.get(node)) {
+        // FIXME: is inline needed here? probably not
         inline .bor, .band, .bxor => |binary| binary,
         inline .lor, .land, .lxor => |binary| binary,
+        inline .eq, .ne => |binary| binary,
         .limplies => unimplemented(),
         inline .iadd, .isub => |*pl| b.air.extraData(pl.bin, Air.Node.Binary),
         else => unreachable,
@@ -617,6 +690,8 @@ fn airBinary(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indice
         .lxor => .bin_bxor,
         .iadd => .bin_iadd,
         .isub => .bin_isub,
+        .eq => .bin_eq,
+        .ne => .bin_ne,
         else => unreachable,
     };
 
@@ -689,11 +764,27 @@ fn airImplies(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indic
     return .{ .single = paren };
 }
 
+fn airSubscript(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices {
+    const subscript = b.air.get(node).subscript;
+
+    // Because aggregates are recursively elaborated, no need to emit
+    // a node here. Just annotate the context with the field index
+    // and elaborate the operand.
+    // TODO: support non-constant array index
+    const val = subscript.index.asInterned().?;
+    var inner: Context = .element(@intCast(b.pool.get(val).tv.val.int));
+    inner.next = top.next;
+    top.next = &inner;
+    defer top.next = inner.next;
+
+    return try b.airExpressionInner(top, ctx, subscript.operand);
+}
+
 fn airField(b: *Builder, top: *Context, ctx: *Context, node: Air.Index) !Indices {
     const field = b.air.get(node).field;
 
     // Because aggregates are recursively elaborated, no need to emit
-    // a node heree. Just annotate the context with the field index
+    // a node here. Just annotate the context with the field index
     // and elaborate the operand.
     var inner: Context = .field(field.index);
     inner.next = top.next;

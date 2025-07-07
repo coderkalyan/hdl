@@ -203,6 +203,11 @@ const Sema = struct {
             if (type_hint) |t| return .{ .ctx = .{ .def_type = t }, .name = .null };
             return .{ .ctx = .{ .def_inferred = {} }, .name = .null };
         }
+
+        pub fn cst(type_hint: ?InternPool.Index) ResultInfo {
+            if (type_hint) |t| return .{ .ctx = .{ .const_type = t }, .name = .null };
+            return .{ .ctx = .{ .const_inferred = {} }, .name = .null };
+        }
     };
 
     pub fn init(gpa: Allocator, arena: Allocator, pool: *InternPool, cst: *const Cst, signature: InternPool.Index, scope: ScopeKind) !Sema {
@@ -489,6 +494,7 @@ const Sema = struct {
         return switch (data) {
             .ident => self.identType(s, index),
             .bundle => self.bundle(s, ri, index),
+            .array => self.array(s, ri, index),
             .module => self.module(s, ri, index),
             else => unimplemented(),
         };
@@ -664,6 +670,23 @@ const Sema = struct {
         });
     }
 
+    fn array(self: *Sema, s: *Scope, _: ResultInfo, index: Cst.Index) !InternPool.Index {
+        const data = self.cst.payload(index).array;
+
+        const len_expression = try self.expression(s, .cst(.int), data.len);
+        const len = self.pool.get(len_expression.asInterned().?).tv.val.int;
+        const element_type = try self.type(s, .ty(.null), data.child);
+
+        return self.pool.put(.{
+            .ty = .{
+                .array = .{
+                    .element_type = element_type,
+                    .len = @intCast(len),
+                },
+            },
+        });
+    }
+
     fn expression(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) Error!Value {
         const data = self.cst.payload(index);
 
@@ -674,6 +697,7 @@ const Sema = struct {
             .unary => self.unary(s, ri, index),
             .binary => self.binary(s, ri, index),
             .bundle_literal => self.bundleLiteral(s, ri, index),
+            .array_literal => self.arrayLiteral(s, ri, index),
             .subscript => self.subscript(s, ri, index),
             .field_access => self.fieldAccess(s, ri, index),
             .slice => self.slice(s, ri, index),
@@ -716,7 +740,7 @@ const Sema = struct {
             // `.const` context.
             .def_type => |hint| val: {
                 const ty = self.pool.get(hint).ty;
-                std.debug.assert((ty == .uint) or (ty == .sint));
+                std.debug.assert((ty == .uint) or (ty == .sint) or (ty == .bits));
                 // FIXME: actually check if coercion is legal properly
                 if (ty == .uint) std.debug.assert(value >= 0);
 
@@ -824,6 +848,7 @@ const Sema = struct {
         const lty = self.typeOf(l);
         const rty = self.typeOf(r);
         if (lty != rty) {
+            std.debug.print("{} {}\n", .{ self.pool.get(lty).ty, self.pool.get(rty).ty });
             try self.addError(.type_binary_diff, main_token);
             return error.SourceError;
         }
@@ -843,6 +868,10 @@ const Sema = struct {
             .k_xor,
             .k_implies,
             => ty == .bool,
+            // TODO: implement equality for aggregate types
+            .equal_equal,
+            .bang_equal,
+            => ty == .bits or ty == .uint or ty == .sint or ty == .bool,
             else => self.unexpectedToken(main_token),
         };
         if (!valid) {
@@ -889,6 +918,8 @@ const Sema = struct {
             .k_or => .{ .lor = bin },
             .k_xor => .{ .lxor = bin },
             .k_implies => .{ .limplies = bin },
+            .equal_equal => .{ .eq = bin },
+            .bang_equal => .{ .ne = bin },
             else => self.unexpectedToken(main_token),
         };
 
@@ -968,26 +999,81 @@ const Sema = struct {
         return Value.index(node);
     }
 
-    fn subscript(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
-        const data = self.cst.payload(index).subscript;
-        const operand = try self.expression(s, ri, data.operand);
+    fn arrayLiteral(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const data = self.cst.payload(index).array_literal;
+        const inits = self.cst.indices(data);
 
-        const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
-        const idx = try self.expression(s, idx_ri, data.index);
+        // TODO: add a comptime compound literal type and add support
+        // for the `.const_inferred` type here
+        // TODO: some kind of type inference?
+        const array_type = ri.ctx.def_type;
+
+        const ty = array: {
+            const ty = self.pool.get(array_type).ty;
+            switch (ty) {
+                .array => |val| break :array val,
+                else => {
+                    const main_token = self.cst.mainToken(index);
+                    try self.addError(.type_coerce_fail, main_token);
+                    return error.SourceError;
+                },
+            }
+        };
+
+        const scratch_top = self.scratch.items.len;
+        defer self.scratch.shrinkRetainingCapacity(scratch_top);
+        const values = try self.allocScratchSlice(Value, inits.len);
+        @memset(values, .index(.null));
+
+        // FIXME: this should be an error
+        std.debug.assert(inits.len == ty.len);
+
+        for (inits, 0..) |idx, i| {
+            const element_ri: ResultInfo = .val(ty.element_type);
+            values[i] = try self.expression(s, element_ri, idx);
+        }
 
         const node = try self.addNode(.{
-            .bit = .{
-                .operand = operand,
-                .index = idx,
+            .array_literal = .{
+                .type = array_type,
+                .inits = try self.addValues(values),
             },
         });
         return Value.index(node);
     }
 
-    fn slice(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+    fn subscript(self: *Sema, s: *Scope, ri: ResultInfo, index: Cst.Index) !Value {
+        const data = self.cst.payload(index).subscript;
+        const operand = try self.expression(s, ri, data.operand);
+        const ty = self.pool.get(self.typeOf(operand)).ty;
+
+        const idx_ri: ResultInfo = .{ .ctx = .{ .const_type = .int } };
+        const idx = try self.expression(s, idx_ri, data.index);
+
+        const node = switch (ty) {
+            .bits, .uint, .sint => try self.addNode(.{
+                .bit = .{
+                    .operand = operand,
+                    .index = idx,
+                },
+            }),
+            .array => try self.addNode(.{
+                .subscript = .{
+                    .operand = operand,
+                    .index = idx,
+                },
+            }),
+            // FIXME: error
+            else => unreachable,
+        };
+
+        return Value.index(node);
+    }
+
+    fn slice(self: *Sema, s: *Scope, _: ResultInfo, index: Cst.Index) !Value {
         const data = self.cst.payload(index).slice;
         const bounds = self.cst.extraData(data.bounds, Cst.Node.Bounds);
-        const operand = try self.expression(s, ri, data.operand);
+        const operand = try self.expression(s, .val(null), data.operand);
         const oty = self.pool.get(self.typeOf(operand)).ty;
         std.debug.assert((oty == .bits) or (oty == .uint) or (oty == .sint));
 
@@ -999,7 +1085,7 @@ const Sema = struct {
         std.debug.assert(lower.tag == .ip);
         const dty = ty: {
             const end: u32 = @intCast(self.pool.get(upper.payload.ip).tv.val.int);
-            const start: u3 = @intCast(self.pool.get(lower.payload.ip).tv.val.int);
+            const start: u32 = @intCast(self.pool.get(lower.payload.ip).tv.val.int);
             std.debug.assert(end >= start);
             const len = end - start;
             break :ty try self.pool.put(.{ .ty = .{ .bits = len } });
